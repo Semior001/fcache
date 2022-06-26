@@ -145,7 +145,7 @@ func (s *S3) Stat(ctx context.Context) (Stats, error) {
 }
 
 func (s *S3) calcStats(ctx context.Context) (keys int, size int64, err error) {
-	ch := s.cl.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: s.prefix + "!!"})
+	ch := s.cl.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: s.key("")})
 
 	for obj := range ch {
 		if obj.Err != nil {
@@ -161,7 +161,7 @@ func (s *S3) calcStats(ctx context.Context) (keys int, size int64, err error) {
 
 // Keys returns all keys, present in cache.
 func (s *S3) Keys(ctx context.Context) ([]string, error) {
-	ch := s.cl.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: s.prefix + "!!"})
+	ch := s.cl.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: s.key("")})
 
 	var res []string
 	for obj := range ch {
