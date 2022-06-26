@@ -6,7 +6,9 @@ package fcache
 import (
 	"context"
 	"io"
+	"net/url"
 	"sync"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 )
@@ -27,6 +29,9 @@ var _ s3client = &s3clientMock{}
 // 			ListObjectsFunc: func(ctx context.Context, bkt string, opts minio.ListObjectsOptions) <-chan minio.ObjectInfo {
 // 				panic("mock out the ListObjects method")
 // 			},
+// 			PresignedGetObjectFunc: func(ctx context.Context, bkt string, key string, expires time.Duration, reqParams url.Values) (*url.URL, error) {
+// 				panic("mock out the PresignedGetObject method")
+// 			},
 // 			PutObjectFunc: func(ctx context.Context, bkt string, key string, rd io.Reader, sz int64, opts minio.PutObjectOptions) (minio.UploadInfo, error) {
 // 				panic("mock out the PutObject method")
 // 			},
@@ -45,6 +50,9 @@ type s3clientMock struct {
 
 	// ListObjectsFunc mocks the ListObjects method.
 	ListObjectsFunc func(ctx context.Context, bkt string, opts minio.ListObjectsOptions) <-chan minio.ObjectInfo
+
+	// PresignedGetObjectFunc mocks the PresignedGetObject method.
+	PresignedGetObjectFunc func(ctx context.Context, bkt string, key string, expires time.Duration, reqParams url.Values) (*url.URL, error)
 
 	// PutObjectFunc mocks the PutObject method.
 	PutObjectFunc func(ctx context.Context, bkt string, key string, rd io.Reader, sz int64, opts minio.PutObjectOptions) (minio.UploadInfo, error)
@@ -74,6 +82,19 @@ type s3clientMock struct {
 			// Opts is the opts argument value.
 			Opts minio.ListObjectsOptions
 		}
+		// PresignedGetObject holds details about calls to the PresignedGetObject method.
+		PresignedGetObject []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Bkt is the bkt argument value.
+			Bkt string
+			// Key is the key argument value.
+			Key string
+			// Expires is the expires argument value.
+			Expires time.Duration
+			// ReqParams is the reqParams argument value.
+			ReqParams url.Values
+		}
 		// PutObject holds details about calls to the PutObject method.
 		PutObject []struct {
 			// Ctx is the ctx argument value.
@@ -101,10 +122,11 @@ type s3clientMock struct {
 			Opts minio.RemoveObjectOptions
 		}
 	}
-	lockGetObject    sync.RWMutex
-	lockListObjects  sync.RWMutex
-	lockPutObject    sync.RWMutex
-	lockRemoveObject sync.RWMutex
+	lockGetObject          sync.RWMutex
+	lockListObjects        sync.RWMutex
+	lockPresignedGetObject sync.RWMutex
+	lockPutObject          sync.RWMutex
+	lockRemoveObject       sync.RWMutex
 }
 
 // GetObject calls GetObjectFunc.
@@ -186,6 +208,53 @@ func (mock *s3clientMock) ListObjectsCalls() []struct {
 	mock.lockListObjects.RLock()
 	calls = mock.calls.ListObjects
 	mock.lockListObjects.RUnlock()
+	return calls
+}
+
+// PresignedGetObject calls PresignedGetObjectFunc.
+func (mock *s3clientMock) PresignedGetObject(ctx context.Context, bkt string, key string, expires time.Duration, reqParams url.Values) (*url.URL, error) {
+	if mock.PresignedGetObjectFunc == nil {
+		panic("s3clientMock.PresignedGetObjectFunc: method is nil but s3client.PresignedGetObject was just called")
+	}
+	callInfo := struct {
+		Ctx       context.Context
+		Bkt       string
+		Key       string
+		Expires   time.Duration
+		ReqParams url.Values
+	}{
+		Ctx:       ctx,
+		Bkt:       bkt,
+		Key:       key,
+		Expires:   expires,
+		ReqParams: reqParams,
+	}
+	mock.lockPresignedGetObject.Lock()
+	mock.calls.PresignedGetObject = append(mock.calls.PresignedGetObject, callInfo)
+	mock.lockPresignedGetObject.Unlock()
+	return mock.PresignedGetObjectFunc(ctx, bkt, key, expires, reqParams)
+}
+
+// PresignedGetObjectCalls gets all the calls that were made to PresignedGetObject.
+// Check the length with:
+//     len(mockeds3client.PresignedGetObjectCalls())
+func (mock *s3clientMock) PresignedGetObjectCalls() []struct {
+	Ctx       context.Context
+	Bkt       string
+	Key       string
+	Expires   time.Duration
+	ReqParams url.Values
+} {
+	var calls []struct {
+		Ctx       context.Context
+		Bkt       string
+		Key       string
+		Expires   time.Duration
+		ReqParams url.Values
+	}
+	mock.lockPresignedGetObject.RLock()
+	calls = mock.calls.PresignedGetObject
+	mock.lockPresignedGetObject.RUnlock()
 	return calls
 }
 

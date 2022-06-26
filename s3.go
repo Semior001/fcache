@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sync/atomic"
 	"time"
 
 	"github.com/minio/minio-go/v7"
 )
 
+//go:generate rm -f s3_mock.go
 //go:generate moq -out s3_mock.go -fmt goimports . s3client
 
 type s3client interface {
@@ -20,6 +22,7 @@ type s3client interface {
 	GetObject(ctx context.Context, bkt, key string, opts minio.GetObjectOptions) (*minio.Object, error)
 	RemoveObject(ctx context.Context, bkt, key string, opts minio.RemoveObjectOptions) error
 	ListObjects(ctx context.Context, bkt string, opts minio.ListObjectsOptions) <-chan minio.ObjectInfo
+	PresignedGetObject(ctx context.Context, bkt, key string, expires time.Duration, reqParams url.Values) (*url.URL, error)
 }
 
 // S3 implements Cache for S3.
@@ -48,7 +51,6 @@ func NewS3(ctx context.Context, backend *minio.Client, bucket, prefix string, op
 	for _, opt := range opts {
 		opt(&res.Options)
 	}
-
 	if res.Options.InvalidatePeriod > 0 {
 		go res.run(ctx)
 	}
@@ -93,18 +95,84 @@ func (s *S3) GetFile(ctx context.Context, key string, fn func() (File, error)) (
 }
 
 // GetURL returns the URL from the cache backend.
-func (s *S3) GetURL(ctx context.Context, key string, fn func() (File, error)) (string, error) {
-	return "", nil
+func (s *S3) GetURL(ctx context.Context, key string, expires time.Duration, fn func() (File, error)) (string, error) {
+	var errResp minio.ErrorResponse
+
+	u, err := s.cl.PresignedGetObject(ctx, s.bucket, s.key(key), expires, url.Values{})
+	if err == nil {
+		// cache hit
+		atomic.AddInt64(&s.Hits, 1)
+		return u.String(), nil
+	}
+
+	if err != nil && !(errors.As(err, &errResp) && errResp.StatusCode == http.StatusNotFound) {
+		// s3 returned unexpected error
+		atomic.AddInt64(&s.Errors, 1)
+		return "", fmt.Errorf("get presigned URL from s3: %w", err)
+	}
+
+	// miss
+	atomic.AddInt64(&s.Misses, 1)
+
+	if _, err = s.put(ctx, s.key(key), fn); err != nil {
+		atomic.AddInt64(&s.Errors, 1)
+		return "", fmt.Errorf("put file to s3: %w", err)
+	}
+
+	if u, err = s.cl.PresignedGetObject(ctx, s.bucket, s.key(key), expires, url.Values{}); err != nil {
+		return "", fmt.Errorf("get presigned URL from s3 after file upload: %w", err)
+	}
+
+	return u.String(), nil
 }
 
 // Stat returns cache stats.
 func (s *S3) Stat(ctx context.Context) (Stats, error) {
-	panic("not implemented") // TODO: Implement
+	var (
+		res = Stats{
+			Hits:   s.Hits,
+			Misses: s.Misses,
+			Errors: s.Errors,
+		}
+		err error
+	)
+
+	if res.Keys, res.Size, err = s.calcStats(ctx); err != nil {
+		return res, fmt.Errorf("calc stats: %w", err)
+	}
+
+	return res, nil
+}
+
+func (s *S3) calcStats(ctx context.Context) (keys int, size int64, err error) {
+	ch := s.cl.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: s.prefix + "!!"})
+
+	for obj := range ch {
+		if obj.Err != nil {
+			return 0, 0, fmt.Errorf("list objects: %w", obj.Err)
+		}
+
+		size += obj.Size
+		keys++
+	}
+
+	return keys, size, nil
 }
 
 // Keys returns all keys, present in cache.
 func (s *S3) Keys(ctx context.Context) ([]string, error) {
-	panic("not implemented") // TODO: Implement
+	ch := s.cl.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: s.prefix + "!!"})
+
+	var res []string
+	for obj := range ch {
+		if obj.Err != nil {
+			return nil, fmt.Errorf("list objects: %w", obj.Err)
+		}
+
+		res = append(res, obj.Key)
+	}
+
+	return res, nil
 }
 
 // run runs invalidation goroutine
