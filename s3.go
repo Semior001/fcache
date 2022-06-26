@@ -85,7 +85,7 @@ func (s *S3) GetFile(ctx context.Context, key string, fn func() (File, error)) (
 	// miss
 	atomic.AddInt64(&s.Misses, 1)
 
-	file, err := s.put(ctx, s.key(key), fn)
+	file, err := s.put(ctx, s.key(key), fn, true)
 	if err != nil {
 		atomic.AddInt64(&s.Errors, 1)
 		return file, fmt.Errorf("put file to s3: %w", err)
@@ -114,7 +114,7 @@ func (s *S3) GetURL(ctx context.Context, key string, expires time.Duration, fn f
 	// miss
 	atomic.AddInt64(&s.Misses, 1)
 
-	if _, err = s.put(ctx, s.key(key), fn); err != nil {
+	if _, err = s.put(ctx, s.key(key), fn, false); err != nil {
 		atomic.AddInt64(&s.Errors, 1)
 		return "", fmt.Errorf("put file to s3: %w", err)
 	}
@@ -209,7 +209,7 @@ func (s *S3) invalidate(ctx context.Context) error {
 	return nil
 }
 
-func (s *S3) put(ctx context.Context, key string, fn func() (File, error)) (File, error) {
+func (s *S3) put(ctx context.Context, key string, fn func() (File, error), copy bool) (File, error) {
 	file, err := fn()
 	if err != nil {
 		return file, err
@@ -218,11 +218,14 @@ func (s *S3) put(ctx context.Context, key string, fn func() (File, error)) (File
 	// duplicating reader to still return file content, when reader is emptied
 	// fixme: probably this part needs to be limited, or file should be saved in
 	// tmp, so a limited amount of files would be in memory
-	buf := &bytes.Buffer{}
-	tr := io.TeeReader(file.Reader, buf)
-	file.Reader = io.NopCloser(buf)
+	putRd := io.Reader(file.Reader)
+	if copy {
+		buf := &bytes.Buffer{}
+		putRd = io.TeeReader(file.Reader, buf)
+		file.Reader = io.NopCloser(buf)
+	}
 
-	_, err = s.cl.PutObject(ctx, s.bucket, key, tr, file.Size, minio.PutObjectOptions{
+	_, err = s.cl.PutObject(ctx, s.bucket, key, putRd, file.Size, minio.PutObjectOptions{
 		UserMetadata: map[string]string{"X-Amz-Meta-Filename": file.Name},
 	})
 	if err != nil {
