@@ -22,7 +22,14 @@ type s3client interface {
 	GetObject(ctx context.Context, bkt, key string, opts minio.GetObjectOptions) (*minio.Object, error)
 	RemoveObject(ctx context.Context, bkt, key string, opts minio.RemoveObjectOptions) error
 	ListObjects(ctx context.Context, bkt string, opts minio.ListObjectsOptions) <-chan minio.ObjectInfo
-	PresignedGetObject(ctx context.Context, bkt, key string, expires time.Duration, reqParams url.Values) (*url.URL, error)
+	StatObject(ctx context.Context, bkt, key string, opts minio.StatObjectOptions) (minio.ObjectInfo, error)
+	PresignHeader(
+		ctx context.Context,
+		method, bkt, key string,
+		expires time.Duration,
+		reqParams url.Values,
+		extraHeaders http.Header,
+	) (u *url.URL, err error)
 }
 
 // S3 implements Cache for S3.
@@ -98,11 +105,21 @@ func (s *S3) GetFile(ctx context.Context, key string, fn func() (File, error)) (
 func (s *S3) GetURL(ctx context.Context, key string, expires time.Duration, fn func() (File, error)) (string, error) {
 	var errResp minio.ErrorResponse
 
-	u, err := s.cl.PresignedGetObject(ctx, s.bucket, s.key(key), expires, url.Values{})
+	getURL := func(filename string) (string, error) {
+		u, err := s.cl.PresignHeader(ctx, http.MethodGet, s.bucket, s.key(key), expires, url.Values{},
+			http.Header{"Content-Disposition": []string{fmt.Sprintf("attachment; filename=%s", filename)}})
+		if err != nil {
+			atomic.AddInt64(&s.Errors, 1)
+			return "", fmt.Errorf("get presigned URL from s3")
+		}
+		return u.String(), nil
+	}
+
+	oi, err := s.cl.StatObject(ctx, s.bucket, s.key(key), minio.StatObjectOptions{})
 	if err == nil {
 		// cache hit
 		atomic.AddInt64(&s.Hits, 1)
-		return u.String(), nil
+		return getURL(s.objectInfoToFile(oi).Name)
 	}
 
 	if err != nil && !(errors.As(err, &errResp) && errResp.StatusCode == http.StatusNotFound) {
@@ -114,16 +131,13 @@ func (s *S3) GetURL(ctx context.Context, key string, expires time.Duration, fn f
 	// miss
 	atomic.AddInt64(&s.Misses, 1)
 
-	if _, err = s.put(ctx, s.key(key), fn, false); err != nil {
+	file, err := s.put(ctx, s.key(key), fn, false)
+	if err != nil {
 		atomic.AddInt64(&s.Errors, 1)
 		return "", fmt.Errorf("put file to s3: %w", err)
 	}
 
-	if u, err = s.cl.PresignedGetObject(ctx, s.bucket, s.key(key), expires, url.Values{}); err != nil {
-		return "", fmt.Errorf("get presigned URL from s3 after file upload: %w", err)
-	}
-
-	return u.String(), nil
+	return getURL(file.Name)
 }
 
 // Stat returns cache stats.
@@ -242,15 +256,20 @@ func (s *S3) key(key string) string {
 	return fmt.Sprintf("%s!!%s", s.prefix, key)
 }
 
+func (s *S3) objectInfoToFile(oi minio.ObjectInfo) File {
+	return File{
+		Name:        oi.Metadata.Get("X-Amz-Meta-Filename"),
+		ContentType: oi.ContentType,
+		Size:        oi.Size,
+	}
+}
+
 func (s *S3) objectToFile(obj *minio.Object) (File, error) {
 	stat, err := s.getObjectInfo(obj)
 	if err != nil {
 		return File{}, fmt.Errorf("get stat: %w", err)
 	}
-	return File{
-		Name:        stat.Metadata.Get("X-Amz-Meta-Filename"),
-		ContentType: stat.ContentType,
-		Reader:      obj,
-		Size:        stat.Size,
-	}, nil
+	file := s.objectInfoToFile(stat)
+	file.Reader = obj
+	return file, nil
 }
