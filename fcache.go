@@ -2,30 +2,38 @@ package fcache
 
 import (
 	"context"
-	"errors"
 	"io"
 )
 
-// ErrNotFound represents a Not Found error.
-var ErrNotFound = errors.New("file not found in cache")
+// Loader is a function to load a file in case if it's missing in cache.
+// WriterTo accepts io.Pipe, and WriteTo will be called in a goroutine, thus
+// the content of the file will be effectively copied directly to storage.
+// The result of bytes size in WriterTo won't be used, as most implementations
+// of cache pre-require the size of the file, but it still might not be provided.
+type Loader func(ctx context.Context) (io.WriterTo, FileMeta, error)
+
+// WriterToFunc is an adapter, to use ordinary functions as io.WriterTo.
+type WriterToFunc func(w io.Writer) (n int64, err error)
+
+// WriteTo implements io.WriterTo.
+func (f WriterToFunc) WriteTo(w io.Writer) (n int64, err error) { return f(w) }
 
 // Cache defines methods to store and return cached values.
 type Cache interface {
 	// GetFile gets the file from cache or loads it, if absent.
-	GetFile(ctx context.Context, key string, fn func() (File, error)) (File, error)
+	GetFile(ctx context.Context, key string, fn Loader) (rd io.ReadCloser, meta FileMeta, err error)
 	// GetURL returns the URL from the cache backend.
-	GetURL(ctx context.Context, key string, fn func() (File, error)) (string, error)
+	GetURL(ctx context.Context, key string, fn Loader) (url string, meta FileMeta, err error)
 	// Stat returns cache stats.
 	Stat(ctx context.Context) (Stats, error)
 	// Keys returns all keys, present in cache.
 	Keys(ctx context.Context) ([]string, error)
 }
 
-// File represent file metadata and its content via Reader.
-type File struct {
+// FileMeta represent information about the file.
+type FileMeta struct {
 	Name        string
 	ContentType string
-	Reader      io.ReadCloser
 	// Size might not be provided when loading file, though it might be useful
 	// for some cache implementations, like S3 as it runs streaming multipart
 	// method, if size is provided

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/minio/minio-go/v7"
+	"golang.org/x/sync/errgroup"
 )
 
 //go:generate rm -f s3_mock.go
@@ -66,7 +67,7 @@ func NewS3(ctx context.Context, backend *minio.Client, bucket, prefix string, op
 }
 
 // GetFile gets the file from cache or loads it, if absent.
-func (s *S3) GetFile(ctx context.Context, key string, fn func() (File, error)) (File, error) {
+func (s *S3) GetFile(ctx context.Context, key string, ld Loader) (io.ReadCloser, FileMeta, error) {
 	var errResp minio.ErrorResponse
 
 	obj, err := s.cl.GetObject(ctx, s.bucket, s.key(key), minio.GetObjectOptions{})
@@ -74,70 +75,70 @@ func (s *S3) GetFile(ctx context.Context, key string, fn func() (File, error)) (
 		// cache hit
 		atomic.AddInt64(&s.Hits, 1)
 
-		file, err := s.objectToFile(obj)
+		oi, err := s.getObjectInfo(obj)
 		if err != nil {
 			atomic.AddInt64(&s.Errors, 1)
-			return File{}, fmt.Errorf("convert object to file: %w", err)
+			return nil, FileMeta{}, fmt.Errorf("get object info: %w", err)
 		}
 
-		return file, nil
+		return obj, s.objectInfoToFile(oi), nil
 	}
 
 	if err != nil && !(errors.As(err, &errResp) && errResp.StatusCode == http.StatusNotFound) {
 		// s3 returned unexpected error
 		atomic.AddInt64(&s.Errors, 1)
-		return File{}, fmt.Errorf("get file from s3: %w", err)
+		return nil, FileMeta{}, fmt.Errorf("get file from s3: %w", err)
 	}
 
 	// miss
 	atomic.AddInt64(&s.Misses, 1)
 
-	file, err := s.put(ctx, s.key(key), fn, true)
+	rd, file, err := s.put(ctx, s.key(key), ld, true)
 	if err != nil {
 		atomic.AddInt64(&s.Errors, 1)
-		return file, fmt.Errorf("put file to s3: %w", err)
+		return nil, file, fmt.Errorf("put file to s3: %w", err)
 	}
 
-	return file, nil
+	return rd, file, nil
 }
 
 // GetURL returns the URL from the cache backend.
-func (s *S3) GetURL(ctx context.Context, key string, expires time.Duration, fn func() (File, error)) (string, error) {
+func (s *S3) GetURL(ctx context.Context, key string, expires time.Duration, ld Loader) (string, FileMeta, error) {
 	var errResp minio.ErrorResponse
 
-	getURL := func(filename string) (string, error) {
+	getURL := func(file FileMeta) (string, FileMeta, error) {
 		u, err := s.cl.PresignHeader(ctx, http.MethodGet, s.bucket, s.key(key), expires, url.Values{},
-			http.Header{"Content-Disposition": []string{fmt.Sprintf("attachment; filename=%s", filename)}})
+			http.Header{"Content-Disposition": []string{fmt.Sprintf("attachment; filename=%s", file.Name)}})
 		if err != nil {
 			atomic.AddInt64(&s.Errors, 1)
-			return "", fmt.Errorf("get presigned URL from s3")
+			return "", FileMeta{}, fmt.Errorf("get presigned URL from s3")
 		}
-		return u.String(), nil
+		return u.String(), file, nil
 	}
 
 	oi, err := s.cl.StatObject(ctx, s.bucket, s.key(key), minio.StatObjectOptions{})
 	if err == nil {
 		// cache hit
 		atomic.AddInt64(&s.Hits, 1)
-		return getURL(s.objectInfoToFile(oi).Name)
+		return getURL(s.objectInfoToFile(oi))
 	}
 
 	if err != nil && !(errors.As(err, &errResp) && errResp.StatusCode == http.StatusNotFound) {
 		// s3 returned unexpected error
 		atomic.AddInt64(&s.Errors, 1)
-		return "", fmt.Errorf("get presigned URL from s3: %w", err)
+		return "", FileMeta{}, fmt.Errorf("get presigned URL from s3: %w", err)
 	}
 
 	// miss
 	atomic.AddInt64(&s.Misses, 1)
 
-	file, err := s.put(ctx, s.key(key), fn, false)
+	_, file, err := s.put(ctx, s.key(key), ld, false)
 	if err != nil {
 		atomic.AddInt64(&s.Errors, 1)
-		return "", fmt.Errorf("put file to s3: %w", err)
+		return "", FileMeta{}, fmt.Errorf("put file to s3: %w", err)
 	}
 
-	return getURL(file.Name)
+	return getURL(file)
 }
 
 // Stat returns cache stats.
@@ -223,30 +224,55 @@ func (s *S3) invalidate(ctx context.Context) error {
 	return nil
 }
 
-func (s *S3) put(ctx context.Context, key string, fn func() (File, error), copy bool) (File, error) {
-	file, err := fn()
-	if err != nil {
-		return file, err
-	}
+// load and put the object into storage, if copy is set to false - it simply
+// returns emptied file reader
+func (s *S3) put(ctx context.Context, key string, ld Loader, copy bool) (rd io.ReadCloser, file FileMeta, err error) {
+	pipeRd, pipeWr := io.Pipe()
+	rd = pipeRd
 
 	// duplicating reader to still return file content, when reader is emptied
 	// fixme: probably this part needs to be limited, or file should be saved in
 	// tmp, so a limited amount of files would be in memory
-	putRd := io.Reader(file.Reader)
+	putRd := io.Reader(rd)
 	if copy {
 		buf := &bytes.Buffer{}
-		putRd = io.TeeReader(file.Reader, buf)
-		file.Reader = io.NopCloser(buf)
+		putRd = io.TeeReader(rd, buf)
+		rd = io.NopCloser(buf)
 	}
 
-	_, err = s.cl.PutObject(ctx, s.bucket, key, putRd, file.Size, minio.PutObjectOptions{
-		UserMetadata: map[string]string{"X-Amz-Meta-Filename": file.Name},
-	})
+	fileWr, file, err := ld(ctx)
 	if err != nil {
-		return file, fmt.Errorf("put file in s3: %w", err)
+		return nil, file, fmt.Errorf("loader returned error: %w", err)
 	}
 
-	return file, nil
+	ewg, ctx := errgroup.WithContext(ctx)
+
+	ewg.Go(func() error {
+		if _, lderr := fileWr.WriteTo(pipeWr); lderr != nil {
+			pipeWr.CloseWithError(lderr)
+			return fmt.Errorf("write file to pipe: %w", lderr)
+		}
+		pipeWr.Close()
+		return nil
+	})
+
+	ewg.Go(func() error {
+		_, perr := s.cl.PutObject(ctx, s.bucket, key, putRd, file.Size, minio.PutObjectOptions{
+			UserMetadata: map[string]string{"X-Amz-Meta-Filename": file.Name},
+		})
+		if perr != nil {
+			pipeRd.CloseWithError(perr)
+			return fmt.Errorf("put file in s3: %w", perr)
+		}
+		pipeRd.Close()
+		return nil
+	})
+
+	if err = ewg.Wait(); err != nil {
+		return nil, file, fmt.Errorf("load and put file: %w", err)
+	}
+
+	return rd, file, nil
 }
 
 func (s *S3) key(key string) string {
@@ -256,20 +282,10 @@ func (s *S3) key(key string) string {
 	return fmt.Sprintf("%s!!%s", s.prefix, key)
 }
 
-func (s *S3) objectInfoToFile(oi minio.ObjectInfo) File {
-	return File{
+func (s *S3) objectInfoToFile(oi minio.ObjectInfo) FileMeta {
+	return FileMeta{
 		Name:        oi.Metadata.Get("X-Amz-Meta-Filename"),
 		ContentType: oi.ContentType,
 		Size:        oi.Size,
 	}
-}
-
-func (s *S3) objectToFile(obj *minio.Object) (File, error) {
-	stat, err := s.getObjectInfo(obj)
-	if err != nil {
-		return File{}, fmt.Errorf("get stat: %w", err)
-	}
-	file := s.objectInfoToFile(stat)
-	file.Reader = obj
-	return file, nil
 }
