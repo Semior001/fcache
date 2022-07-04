@@ -2,268 +2,272 @@ package fcache
 
 import (
 	"context"
-	"errors"
+	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"io"
-	"time"
-	"net/url"
 )
 
-func TestS3_GetFile(t *testing.T) {
-	t.Run("hit", func(t *testing.T) {
-		expectedObj := &minio.Object{}
-		client := &s3clientMock{
-			GetObjectFunc: func(ctx context.Context,
-				bkt, key string,
-				opts minio.GetObjectOptions,
-			) (*minio.Object, error) {
-				assert.Equal(t, "bucket", bkt)
-				assert.Equal(t, "prefix!!key", key)
-				assert.Equal(t, minio.GetObjectOptions{}, opts)
-				return expectedObj, nil
-			},
-		}
+func TestS3_Meta(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		now := time.Now()
 		svc := &S3{
+			cl: &s3clientMock{
+				StatObjectFunc: func(ctx context.Context, bkt, key string, opts minio.GetObjectOptions) (minio.ObjectInfo, error) {
+					assert.Equal(t, "bucket", bkt)
+					assert.Equal(t, "prefix!!key", key)
+					assert.Empty(t, opts)
+					return minio.ObjectInfo{
+						Metadata:     http.Header{filenameMetaHeader: []string{"a.txt"}},
+						ContentType:  "text/plain",
+						Size:         123,
+						LastModified: now,
+						Key:          "prefix!!key",
+					}, nil
+				},
+			},
 			bucket: "bucket",
 			prefix: "prefix",
-			cl:     client,
-			getObjectInfo: func(obj *minio.Object) (minio.ObjectInfo, error) {
-				assert.True(t, expectedObj == obj, "pointer to s3 object")
-				return minio.ObjectInfo{
-					Metadata:    http.Header{"X-Amz-Meta-Filename": []string{"a.txt"}},
-					ContentType: "text/plain",
-					Size:        15,
-				}, nil
-			},
 		}
 
-		rd, file, err := svc.GetFile(context.Background(), "key", nil)
+		meta, err := svc.Meta(context.Background(), "key")
 		require.NoError(t, err)
 		assert.Equal(t, FileMeta{
-			Name:        "a.txt",
-			ContentType: "text/plain",
-			Size:        15,
-		}, file)
-		assert.True(t, expectedObj == rd, "pointer to s3 object")
-		assert.Equal(t, Stats{Hits: 1}, svc.Stats)
+			Name:      "a.txt",
+			Mime:      "text/plain",
+			Size:      123,
+			Key:       "key",
+			CreatedAt: now,
+		}, meta)
 	})
+}
 
-	t.Run("error", func(t *testing.T) {
-		expectedErr := errors.New("some error")
-		client := &s3clientMock{
-			GetObjectFunc: func(context.Context, string, string, minio.GetObjectOptions) (*minio.Object, error) {
-				return nil, expectedErr
-			},
-		}
+func TestS3_Get(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		obj := &minio.Object{}
 		svc := &S3{
 			bucket: "bucket",
 			prefix: "prefix",
-			cl:     client,
-		}
-
-		rd, file, err := svc.GetFile(context.Background(), "key", nil)
-		assert.ErrorIs(t, err, expectedErr)
-		assert.Empty(t, file)
-		assert.Nil(t, rd)
-		assert.Equal(t, Stats{Errors: 1}, svc.Stats)
-	})
-
-	t.Run("miss", func(t *testing.T) {
-		client := &s3clientMock{
-			GetObjectFunc: func(context.Context, string, string, minio.GetObjectOptions) (*minio.Object, error) {
-				return nil, minio.ErrorResponse{StatusCode: http.StatusNotFound}
-			},
-			PutObjectFunc: func(ctx context.Context,
-				bkt, key string, rd io.Reader, sz int64,
-				opts minio.PutObjectOptions,
-			) (minio.UploadInfo, error) {
-				assert.Equal(t, "bucket", bkt)
-				assert.Equal(t, "prefix!!key", key)
-				bts, err := io.ReadAll(rd)
-				require.NoError(t, err)
-				assert.Equal(t, "some file content", string(bts))
-				assert.Equal(t, int64(17), sz)
-				assert.Equal(t, minio.PutObjectOptions{
-					UserMetadata: map[string]string{
-						"X-Amz-Meta-Filename": "a.txt",
-					},
-				}, opts)
-				return minio.UploadInfo{}, nil
+			cl: &s3clientMock{
+				GetObjectFunc: func(ctx context.Context,
+					bkt, key string,
+					opts minio.GetObjectOptions,
+				) (*minio.Object, error) {
+					assert.Equal(t, "bucket", bkt)
+					assert.Equal(t, "prefix!!key", key)
+					assert.Empty(t, opts)
+					return obj, nil
+				},
 			},
 		}
-		svc := &S3{
-			bucket: "bucket",
-			prefix: "prefix",
-			cl:     client,
-		}
-		rd, file, err := svc.GetFile(context.Background(), "key", func(ctx context.Context) (io.WriterTo, FileMeta, error) {
-			return WriterToFunc(func(w io.Writer) (int64, error) {
-					n, err := w.Write([]byte("some file content"))
-					return int64(n), err
-				}), FileMeta{
-					Name:        "a.txt",
-					ContentType: "text/plain",
-					Size:        17,
-				}, nil
-		})
+		ro, err := svc.Get(context.Background(), "key")
 		require.NoError(t, err)
-		assert.Equal(t, "a.txt", file.Name)
-		assert.Equal(t, "text/plain", file.ContentType)
-		assert.Equal(t, int64(17), file.Size)
-
-		bts, err := io.ReadAll(rd)
-		require.NoError(t, err)
-		assert.Equal(t, "some file content", string(bts))
-
-		assert.Equal(t, Stats{Misses: 1}, svc.Stats)
+		assert.True(t, obj == ro)
 	})
 }
 
 func TestS3_GetURL(t *testing.T) {
-	t.Run("hit", func(t *testing.T) {
-		client := &s3clientMock{
-			PresignHeaderFunc: func(ctx context.Context,
-				mtd, bkt, key string,
-				expires time.Duration,
-				reqParams url.Values,
-				extraHeaders http.Header,
-			) (*url.URL, error) {
-				assert.Equal(t, http.MethodGet, mtd)
-				assert.Equal(t, "bucket", bkt)
-				assert.Equal(t, "prefix!!key", key)
-				assert.Equal(t, 5*time.Minute, expires)
-				assert.Empty(t, reqParams)
-				assert.Equal(t, http.Header{
-					"Content-Disposition": []string{"attachment; filename=a.txt"},
-				}, extraHeaders)
-				return url.Parse("https://example.com/test/someurl")
-			},
-			StatObjectFunc: func(ctx context.Context,
-				bkt, key string,
-				opts minio.GetObjectOptions,
-			) (minio.ObjectInfo, error) {
-				assert.Equal(t, "bucket", bkt)
-				assert.Equal(t, "prefix!!key", key)
-				assert.Equal(t, minio.GetObjectOptions{}, opts)
-				return minio.ObjectInfo{
-					Metadata:    http.Header{"X-Amz-Meta-Filename": []string{"a.txt"}},
-					ContentType: "text/plain",
-					Size:        15,
-				}, nil
-			},
-		}
+	t.Run("success", func(t *testing.T) {
+		now := time.Now()
 		svc := &S3{
-			bucket: "bucket",
-			prefix: "prefix",
-			cl:     client,
-		}
-
-		u, file, err := svc.GetURL(context.Background(), "key", 5*time.Minute, nil)
-		require.NoError(t, err)
-		assert.Equal(t, FileMeta{
-			Name:        "a.txt",
-			ContentType: "text/plain",
-			Size:        15,
-		}, file)
-		assert.Equal(t, "https://example.com/test/someurl", u, "pointer to s3 object")
-		assert.Equal(t, Stats{Hits: 1}, svc.Stats)
-	})
-
-	t.Run("error", func(t *testing.T) {
-		expectedErr := errors.New("some error")
-		client := &s3clientMock{
-			StatObjectFunc: func(ctx context.Context,
-				bkt string, key string,
-				opts minio.GetObjectOptions) (minio.ObjectInfo, error) {
-				assert.Equal(t, "bucket", bkt)
-				assert.Equal(t, "prefix!!key", key)
-				assert.Empty(t, opts)
-				return minio.ObjectInfo{}, expectedErr
-			},
-		}
-		svc := &S3{
-			bucket: "bucket",
-			prefix: "prefix",
-			cl:     client,
-		}
-
-		u, file, err := svc.GetURL(context.Background(), "key", 5*time.Minute, nil)
-		assert.ErrorIs(t, err, expectedErr)
-		assert.Empty(t, file)
-		assert.Empty(t, u)
-		assert.Equal(t, Stats{Errors: 1}, svc.Stats)
-	})
-
-	t.Run("miss", func(t *testing.T) {
-		client := &s3clientMock{
-			StatObjectFunc: func(ctx context.Context,
-				bkt, key string,
-				opts minio.GetObjectOptions,
-			) (minio.ObjectInfo, error) {
-				return minio.ObjectInfo{}, minio.ErrorResponse{StatusCode: http.StatusNotFound}
-			},
-			PresignHeaderFunc: func(ctx context.Context,
-				mtd, bkt, key string,
-				expires time.Duration,
-				reqParams url.Values,
-				extraHeaders http.Header,
-			) (*url.URL, error) {
-				assert.Equal(t, http.MethodGet, mtd)
-				assert.Equal(t, "bucket", bkt)
-				assert.Equal(t, "prefix!!key", key)
-				assert.Equal(t, 5*time.Minute, expires)
-				assert.Empty(t, reqParams)
-				assert.Equal(t, http.Header{
-					"Content-Disposition": []string{"attachment; filename=a.txt"},
-				}, extraHeaders)
-				return url.Parse("https://example.com/test/someurl")
-			},
-			PutObjectFunc: func(ctx context.Context,
-				bkt, key string, rd io.Reader, sz int64,
-				opts minio.PutObjectOptions,
-			) (minio.UploadInfo, error) {
-				assert.Equal(t, "bucket", bkt)
-				assert.Equal(t, "prefix!!key", key)
-				bts, err := io.ReadAll(rd)
-				require.NoError(t, err)
-				assert.Equal(t, "some file content", string(bts))
-				assert.Equal(t, int64(17), sz)
-				assert.Equal(t, minio.PutObjectOptions{
-					UserMetadata: map[string]string{
-						"X-Amz-Meta-Filename": "a.txt",
-					},
-				}, opts)
-				return minio.UploadInfo{}, nil
-			},
-		}
-		svc := &S3{
-			bucket: "bucket",
-			prefix: "prefix",
-			cl:     client,
-		}
-		u, file, err := svc.GetURL(context.Background(), "key", 5*time.Minute,
-			func(ctx context.Context) (io.WriterTo, FileMeta, error) {
-				return WriterToFunc(func(w io.Writer) (int64, error) {
-						n, err := w.Write([]byte("some file content"))
-						return int64(n), err
-					}), FileMeta{
-						Name:        "a.txt",
-						ContentType: "text/plain",
-						Size:        17,
+			cl: &s3clientMock{
+				StatObjectFunc: func(ctx context.Context, bkt, key string, opts minio.GetObjectOptions) (minio.ObjectInfo, error) {
+					assert.Equal(t, "bucket", bkt)
+					assert.Equal(t, "prefix!!key", key)
+					assert.Empty(t, opts)
+					return minio.ObjectInfo{
+						Metadata:     http.Header{filenameMetaHeader: []string{"a.txt"}},
+						ContentType:  "text/plain",
+						Size:         123,
+						LastModified: now,
+						Key:          "prefix!!key",
 					}, nil
-			})
+				},
+				PresignHeaderFunc: func(ctx context.Context,
+					method, bkt, key string,
+					expires time.Duration,
+					reqParams url.Values,
+					extraHeaders http.Header,
+				) (*url.URL, error) {
+					assert.Equal(t, http.MethodGet, method)
+					assert.Equal(t, "bucket", bkt)
+					assert.Equal(t, "prefix!!key", key)
+					assert.Equal(t, 15*time.Minute, expires)
+					assert.Empty(t, reqParams)
+					assert.Equal(t, http.Header{
+						"Content-Disposition": []string{"attachment; filename=a.txt"},
+					}, extraHeaders)
+					return url.Parse("https://example.com/somefile.txt?somekey=somevalue")
+				},
+			},
+			bucket: "bucket",
+			prefix: "prefix",
+		}
+
+		meta, err := svc.GetURL(context.Background(), "key", 15*time.Minute)
 		require.NoError(t, err)
-		assert.Equal(t, "a.txt", file.Name)
-		assert.Equal(t, "text/plain", file.ContentType)
-		assert.Equal(t, int64(17), file.Size)
+		assert.Equal(t, "https://example.com/somefile.txt?somekey=somevalue", meta)
+	})
+}
 
-		assert.Equal(t, "https://example.com/test/someurl", u)
+func TestS3_Put(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		svc := &S3{
+			cl: &s3clientMock{
+				PutObjectFunc: func(ctx context.Context,
+					bkt, key string,
+					rd io.Reader, sz int64,
+					opts minio.PutObjectOptions,
+				) (minio.UploadInfo, error) {
+					assert.Equal(t, "bucket", bkt)
+					assert.Equal(t, "prefix!!key", key)
+					assert.Equal(t, int64(17), sz)
+					assert.Equal(t, minio.PutObjectOptions{
+						ContentType:  "text/plain",
+						UserMetadata: map[string]string{filenameMetaHeader: "a.txt"},
+					}, opts)
 
-		assert.Equal(t, Stats{Misses: 1}, svc.Stats)
+					bts, err := io.ReadAll(rd)
+					require.NoError(t, err)
+					assert.Equal(t, []byte("some file data"), bts)
+
+					return minio.UploadInfo{}, nil
+				},
+			},
+			bucket: "bucket",
+			prefix: "prefix",
+		}
+
+		err := svc.Put(context.Background(), "key", FileMeta{
+			Name: "a.txt",
+			Mime: "text/plain",
+			Size: 17,
+		}, io.NopCloser(strings.NewReader("some file data")))
+		require.NoError(t, err)
+	})
+}
+
+func TestS3_Remove(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		svc := &S3{
+			cl: &s3clientMock{
+				RemoveObjectFunc: func(ctx context.Context,
+					bkt, key string,
+					opts minio.RemoveObjectOptions,
+				) error {
+					assert.Equal(t, "bucket", bkt)
+					assert.Equal(t, "prefix!!key", key)
+					assert.Empty(t, opts)
+					return nil
+				},
+			},
+			bucket: "bucket",
+			prefix: "prefix",
+		}
+		err := svc.Remove(context.Background(), "key")
+		require.NoError(t, err)
+	})
+}
+
+func TestS3_Stat(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		svc := &S3{
+			cl: &s3clientMock{
+				ListObjectsFunc: func(ctx context.Context, bkt string, opts minio.ListObjectsOptions) <-chan minio.ObjectInfo {
+					assert.Equal(t, minio.ListObjectsOptions{Prefix: "prefix!!"}, opts)
+					assert.Equal(t, "bucket", bkt)
+					ch := make(chan minio.ObjectInfo, 2)
+					ch <- minio.ObjectInfo{Size: 12}
+					ch <- minio.ObjectInfo{Size: 16}
+					close(ch)
+					return ch
+				},
+			},
+			bucket: "bucket",
+			prefix: "prefix",
+		}
+		stat, err := svc.Stat(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, StoreStats{Keys: 2, Size: 28}, stat)
+	})
+}
+
+func TestS3_List(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		now := time.Now()
+		svc := &S3{
+			cl: &s3clientMock{
+				ListObjectsFunc: func(ctx context.Context, bkt string, opts minio.ListObjectsOptions) <-chan minio.ObjectInfo {
+					assert.Equal(t, minio.ListObjectsOptions{WithMetadata: true, Prefix: "prefix!!"}, opts)
+					assert.Equal(t, "bucket", bkt)
+					ch := make(chan minio.ObjectInfo, 2)
+					ch <- minio.ObjectInfo{
+						Metadata:     map[string][]string{filenameMetaHeader: {"a.txt"}},
+						ContentType:  "text/plain",
+						Size:         12,
+						Key:          "prefix!!key",
+						LastModified: now,
+					}
+					ch <- minio.ObjectInfo{
+						Metadata:     map[string][]string{filenameMetaHeader: {"b.txt"}},
+						ContentType:  "text/plain",
+						Size:         16,
+						Key:          "prefix!!key-1",
+						LastModified: now.Add(15 * time.Minute),
+					}
+					close(ch)
+					return ch
+				},
+			},
+			bucket: "bucket",
+			prefix: "prefix",
+		}
+		objs, err := svc.List(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, []FileMeta{
+			{
+				Name:      "a.txt",
+				Mime:      "text/plain",
+				Size:      12,
+				Key:       "key",
+				CreatedAt: now,
+			},
+			{
+				Name:      "b.txt",
+				Mime:      "text/plain",
+				Size:      16,
+				Key:       "key-1",
+				CreatedAt: now.Add(15 * time.Minute),
+			},
+		}, objs)
+	})
+}
+
+func TestS3_Keys(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		svc := &S3{
+			cl: &s3clientMock{
+				ListObjectsFunc: func(ctx context.Context, bkt string, opts minio.ListObjectsOptions) <-chan minio.ObjectInfo {
+					assert.Equal(t, minio.ListObjectsOptions{Prefix: "prefix!!"}, opts)
+					assert.Equal(t, "bucket", bkt)
+					ch := make(chan minio.ObjectInfo, 2)
+					ch <- minio.ObjectInfo{Key: "prefix!!key-1"}
+					ch <- minio.ObjectInfo{Key: "prefix!!key-2"}
+					close(ch)
+					return ch
+				},
+			},
+			bucket: "bucket",
+			prefix: "prefix",
+		}
+		keys, err := svc.Keys(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, []string{"key-1", "key-2"}, keys)
 	})
 }
