@@ -7,9 +7,9 @@ import (
 
 // Loader is a function to load a file in case if it's missing in cache.
 // WriterTo accepts io.Pipe, and WriteTo will be called in a goroutine, thus
-// the content of the file will be effectively copied directly to storage.
-// The result of bytes size in WriterTo won't be used, as most implementations
-// of cache pre-require the size of the file, but it still might not be provided.
+// the content of the file will be effectively copied directly to the storage.
+// The number of bytes written, returned by WriterTo won't be used, as most
+// implementations, file size in FileMeta will be used instead.
 type Loader func(ctx context.Context) (io.WriterTo, FileMeta, error)
 
 // WriterToFunc is an adapter, to use ordinary functions as io.WriterTo.
