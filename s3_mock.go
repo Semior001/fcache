@@ -6,6 +6,7 @@ package fcache
 import (
 	"context"
 	"io"
+	"net/http"
 	"net/url"
 	"sync"
 	"time"
@@ -29,14 +30,17 @@ var _ s3client = &s3clientMock{}
 // 			ListObjectsFunc: func(ctx context.Context, bkt string, opts minio.ListObjectsOptions) <-chan minio.ObjectInfo {
 // 				panic("mock out the ListObjects method")
 // 			},
-// 			PresignedGetObjectFunc: func(ctx context.Context, bkt string, key string, expires time.Duration, reqParams url.Values) (*url.URL, error) {
-// 				panic("mock out the PresignedGetObject method")
+// 			PresignHeaderFunc: func(ctx context.Context, method string, bkt string, key string, expires time.Duration, reqParams url.Values, extraHeaders http.Header) (*url.URL, error) {
+// 				panic("mock out the PresignHeader method")
 // 			},
 // 			PutObjectFunc: func(ctx context.Context, bkt string, key string, rd io.Reader, sz int64, opts minio.PutObjectOptions) (minio.UploadInfo, error) {
 // 				panic("mock out the PutObject method")
 // 			},
 // 			RemoveObjectFunc: func(ctx context.Context, bkt string, key string, opts minio.RemoveObjectOptions) error {
 // 				panic("mock out the RemoveObject method")
+// 			},
+// 			StatObjectFunc: func(ctx context.Context, bkt string, key string, opts minio.GetObjectOptions) (minio.ObjectInfo, error) {
+// 				panic("mock out the StatObject method")
 // 			},
 // 		}
 //
@@ -51,14 +55,17 @@ type s3clientMock struct {
 	// ListObjectsFunc mocks the ListObjects method.
 	ListObjectsFunc func(ctx context.Context, bkt string, opts minio.ListObjectsOptions) <-chan minio.ObjectInfo
 
-	// PresignedGetObjectFunc mocks the PresignedGetObject method.
-	PresignedGetObjectFunc func(ctx context.Context, bkt string, key string, expires time.Duration, reqParams url.Values) (*url.URL, error)
+	// PresignHeaderFunc mocks the PresignHeader method.
+	PresignHeaderFunc func(ctx context.Context, method string, bkt string, key string, expires time.Duration, reqParams url.Values, extraHeaders http.Header) (*url.URL, error)
 
 	// PutObjectFunc mocks the PutObject method.
 	PutObjectFunc func(ctx context.Context, bkt string, key string, rd io.Reader, sz int64, opts minio.PutObjectOptions) (minio.UploadInfo, error)
 
 	// RemoveObjectFunc mocks the RemoveObject method.
 	RemoveObjectFunc func(ctx context.Context, bkt string, key string, opts minio.RemoveObjectOptions) error
+
+	// StatObjectFunc mocks the StatObject method.
+	StatObjectFunc func(ctx context.Context, bkt string, key string, opts minio.GetObjectOptions) (minio.ObjectInfo, error)
 
 	// calls tracks calls to the methods.
 	calls struct {
@@ -82,10 +89,12 @@ type s3clientMock struct {
 			// Opts is the opts argument value.
 			Opts minio.ListObjectsOptions
 		}
-		// PresignedGetObject holds details about calls to the PresignedGetObject method.
-		PresignedGetObject []struct {
+		// PresignHeader holds details about calls to the PresignHeader method.
+		PresignHeader []struct {
 			// Ctx is the ctx argument value.
 			Ctx context.Context
+			// Method is the method argument value.
+			Method string
 			// Bkt is the bkt argument value.
 			Bkt string
 			// Key is the key argument value.
@@ -94,6 +103,8 @@ type s3clientMock struct {
 			Expires time.Duration
 			// ReqParams is the reqParams argument value.
 			ReqParams url.Values
+			// ExtraHeaders is the extraHeaders argument value.
+			ExtraHeaders http.Header
 		}
 		// PutObject holds details about calls to the PutObject method.
 		PutObject []struct {
@@ -121,12 +132,24 @@ type s3clientMock struct {
 			// Opts is the opts argument value.
 			Opts minio.RemoveObjectOptions
 		}
+		// StatObject holds details about calls to the StatObject method.
+		StatObject []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Bkt is the bkt argument value.
+			Bkt string
+			// Key is the key argument value.
+			Key string
+			// Opts is the opts argument value.
+			Opts minio.GetObjectOptions
+		}
 	}
-	lockGetObject          sync.RWMutex
-	lockListObjects        sync.RWMutex
-	lockPresignedGetObject sync.RWMutex
-	lockPutObject          sync.RWMutex
-	lockRemoveObject       sync.RWMutex
+	lockGetObject     sync.RWMutex
+	lockListObjects   sync.RWMutex
+	lockPresignHeader sync.RWMutex
+	lockPutObject     sync.RWMutex
+	lockRemoveObject  sync.RWMutex
+	lockStatObject    sync.RWMutex
 }
 
 // GetObject calls GetObjectFunc.
@@ -211,50 +234,58 @@ func (mock *s3clientMock) ListObjectsCalls() []struct {
 	return calls
 }
 
-// PresignedGetObject calls PresignedGetObjectFunc.
-func (mock *s3clientMock) PresignedGetObject(ctx context.Context, bkt string, key string, expires time.Duration, reqParams url.Values) (*url.URL, error) {
-	if mock.PresignedGetObjectFunc == nil {
-		panic("s3clientMock.PresignedGetObjectFunc: method is nil but s3client.PresignedGetObject was just called")
+// PresignHeader calls PresignHeaderFunc.
+func (mock *s3clientMock) PresignHeader(ctx context.Context, method string, bkt string, key string, expires time.Duration, reqParams url.Values, extraHeaders http.Header) (*url.URL, error) {
+	if mock.PresignHeaderFunc == nil {
+		panic("s3clientMock.PresignHeaderFunc: method is nil but s3client.PresignHeader was just called")
 	}
 	callInfo := struct {
-		Ctx       context.Context
-		Bkt       string
-		Key       string
-		Expires   time.Duration
-		ReqParams url.Values
+		Ctx          context.Context
+		Method       string
+		Bkt          string
+		Key          string
+		Expires      time.Duration
+		ReqParams    url.Values
+		ExtraHeaders http.Header
 	}{
-		Ctx:       ctx,
-		Bkt:       bkt,
-		Key:       key,
-		Expires:   expires,
-		ReqParams: reqParams,
+		Ctx:          ctx,
+		Method:       method,
+		Bkt:          bkt,
+		Key:          key,
+		Expires:      expires,
+		ReqParams:    reqParams,
+		ExtraHeaders: extraHeaders,
 	}
-	mock.lockPresignedGetObject.Lock()
-	mock.calls.PresignedGetObject = append(mock.calls.PresignedGetObject, callInfo)
-	mock.lockPresignedGetObject.Unlock()
-	return mock.PresignedGetObjectFunc(ctx, bkt, key, expires, reqParams)
+	mock.lockPresignHeader.Lock()
+	mock.calls.PresignHeader = append(mock.calls.PresignHeader, callInfo)
+	mock.lockPresignHeader.Unlock()
+	return mock.PresignHeaderFunc(ctx, method, bkt, key, expires, reqParams, extraHeaders)
 }
 
-// PresignedGetObjectCalls gets all the calls that were made to PresignedGetObject.
+// PresignHeaderCalls gets all the calls that were made to PresignHeader.
 // Check the length with:
-//     len(mockeds3client.PresignedGetObjectCalls())
-func (mock *s3clientMock) PresignedGetObjectCalls() []struct {
-	Ctx       context.Context
-	Bkt       string
-	Key       string
-	Expires   time.Duration
-	ReqParams url.Values
+//     len(mockeds3client.PresignHeaderCalls())
+func (mock *s3clientMock) PresignHeaderCalls() []struct {
+	Ctx          context.Context
+	Method       string
+	Bkt          string
+	Key          string
+	Expires      time.Duration
+	ReqParams    url.Values
+	ExtraHeaders http.Header
 } {
 	var calls []struct {
-		Ctx       context.Context
-		Bkt       string
-		Key       string
-		Expires   time.Duration
-		ReqParams url.Values
+		Ctx          context.Context
+		Method       string
+		Bkt          string
+		Key          string
+		Expires      time.Duration
+		ReqParams    url.Values
+		ExtraHeaders http.Header
 	}
-	mock.lockPresignedGetObject.RLock()
-	calls = mock.calls.PresignedGetObject
-	mock.lockPresignedGetObject.RUnlock()
+	mock.lockPresignHeader.RLock()
+	calls = mock.calls.PresignHeader
+	mock.lockPresignHeader.RUnlock()
 	return calls
 }
 
@@ -349,5 +380,48 @@ func (mock *s3clientMock) RemoveObjectCalls() []struct {
 	mock.lockRemoveObject.RLock()
 	calls = mock.calls.RemoveObject
 	mock.lockRemoveObject.RUnlock()
+	return calls
+}
+
+// StatObject calls StatObjectFunc.
+func (mock *s3clientMock) StatObject(ctx context.Context, bkt string, key string, opts minio.GetObjectOptions) (minio.ObjectInfo, error) {
+	if mock.StatObjectFunc == nil {
+		panic("s3clientMock.StatObjectFunc: method is nil but s3client.StatObject was just called")
+	}
+	callInfo := struct {
+		Ctx  context.Context
+		Bkt  string
+		Key  string
+		Opts minio.GetObjectOptions
+	}{
+		Ctx:  ctx,
+		Bkt:  bkt,
+		Key:  key,
+		Opts: opts,
+	}
+	mock.lockStatObject.Lock()
+	mock.calls.StatObject = append(mock.calls.StatObject, callInfo)
+	mock.lockStatObject.Unlock()
+	return mock.StatObjectFunc(ctx, bkt, key, opts)
+}
+
+// StatObjectCalls gets all the calls that were made to StatObject.
+// Check the length with:
+//     len(mockeds3client.StatObjectCalls())
+func (mock *s3clientMock) StatObjectCalls() []struct {
+	Ctx  context.Context
+	Bkt  string
+	Key  string
+	Opts minio.GetObjectOptions
+} {
+	var calls []struct {
+		Ctx  context.Context
+		Bkt  string
+		Key  string
+		Opts minio.GetObjectOptions
+	}
+	mock.lockStatObject.RLock()
+	calls = mock.calls.StatObject
+	mock.lockStatObject.RUnlock()
 	return calls
 }
