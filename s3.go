@@ -249,10 +249,10 @@ func (s *S3) put(ctx context.Context, key string, ld Loader, copy bool) (rd io.R
 
 	ewg.Go(func() error {
 		if _, lderr := fileWr.WriteTo(pipeWr); lderr != nil {
-			pipeWr.CloseWithError(lderr)
+			_ = pipeWr.CloseWithError(lderr)
 			return fmt.Errorf("write file to pipe: %w", lderr)
 		}
-		pipeWr.Close()
+		_ = pipeWr.Close()
 		return nil
 	})
 
@@ -261,10 +261,10 @@ func (s *S3) put(ctx context.Context, key string, ld Loader, copy bool) (rd io.R
 			UserMetadata: map[string]string{"X-Amz-Meta-Filename": file.Name},
 		})
 		if perr != nil {
-			pipeRd.CloseWithError(perr)
+			_ = pipeRd.CloseWithError(perr)
 			return fmt.Errorf("put file in s3: %w", perr)
 		}
-		pipeRd.Close()
+		_ = pipeRd.Close()
 		return nil
 	})
 
