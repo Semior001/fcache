@@ -89,20 +89,17 @@ func TestS3_GetURL(t *testing.T) {
 						Key:          "prefix!!key",
 					}, nil
 				},
-				PresignHeaderFunc: func(ctx context.Context,
-					method, bkt, key string,
+				PresignedGetObjectFunc: func(ctx context.Context,
+					bkt, key string,
 					expires time.Duration,
 					reqParams url.Values,
-					extraHeaders http.Header,
 				) (*url.URL, error) {
-					assert.Equal(t, http.MethodGet, method)
 					assert.Equal(t, "bucket", bkt)
 					assert.Equal(t, "prefix!!key", key)
 					assert.Equal(t, 15*time.Minute, expires)
-					assert.Empty(t, reqParams)
-					assert.Equal(t, http.Header{
-						"Content-Disposition": []string{"attachment; filename=a.txt"},
-					}, extraHeaders)
+					assert.Equal(t, url.Values{
+						"response-content-disposition": []string{"attachment; filename=a.txt"},
+					}, reqParams)
 					return url.Parse("https://example.com/somefile.txt?somekey=somevalue")
 				},
 			},

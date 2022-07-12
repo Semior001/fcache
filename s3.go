@@ -24,12 +24,11 @@ type s3client interface {
 	RemoveObject(ctx context.Context, bkt, key string, opts minio.RemoveObjectOptions) error
 	ListObjects(ctx context.Context, bkt string, opts minio.ListObjectsOptions) <-chan minio.ObjectInfo
 	StatObject(ctx context.Context, bkt, key string, opts minio.StatObjectOptions) (minio.ObjectInfo, error)
-	PresignHeader(
+	PresignedGetObject(
 		ctx context.Context,
-		method, bkt, key string,
+		bkt, key string,
 		expires time.Duration,
 		reqParams url.Values,
-		extraHeaders http.Header,
 	) (u *url.URL, err error)
 }
 
@@ -94,10 +93,9 @@ func (s *S3) GetURL(ctx context.Context, key string, expires time.Duration) (str
 		return "", fmt.Errorf("stat object from s3: %w", err)
 	}
 
-	u, err := s.cl.PresignHeader(ctx, http.MethodGet, s.bucket, s.key(key), expires, url.Values{},
-		http.Header{"Content-Disposition": []string{
-			fmt.Sprintf("attachment; filename=%s", s.objectInfoToFile(oi).Name),
-		}})
+	u, err := s.cl.PresignedGetObject(ctx, s.bucket, s.key(key), expires, url.Values{
+		"response-content-disposition": []string{fmt.Sprintf("attachment; filename=%s", s.objectInfoToFile(oi).Name)},
+	})
 	if err != nil {
 		return "", fmt.Errorf("get presigned URL from s3")
 	}
