@@ -7,7 +7,6 @@ import (
 	"context"
 	"io"
 	"sync"
-	"time"
 )
 
 // Ensure, that StoreMock does implement Store.
@@ -23,7 +22,7 @@ var _ Store = &StoreMock{}
 // 			GetFunc: func(ctx context.Context, key string) (io.ReadCloser, error) {
 // 				panic("mock out the Get method")
 // 			},
-// 			GetURLFunc: func(ctx context.Context, key string, expires time.Duration) (string, error) {
+// 			GetURLFunc: func(ctx context.Context, key string, params GetURLParams) (string, error) {
 // 				panic("mock out the GetURL method")
 // 			},
 // 			KeysFunc: func(ctx context.Context) ([]string, error) {
@@ -55,7 +54,7 @@ type StoreMock struct {
 	GetFunc func(ctx context.Context, key string) (io.ReadCloser, error)
 
 	// GetURLFunc mocks the GetURL method.
-	GetURLFunc func(ctx context.Context, key string, expires time.Duration) (string, error)
+	GetURLFunc func(ctx context.Context, key string, params GetURLParams) (string, error)
 
 	// KeysFunc mocks the Keys method.
 	KeysFunc func(ctx context.Context) ([]string, error)
@@ -90,8 +89,8 @@ type StoreMock struct {
 			Ctx context.Context
 			// Key is the key argument value.
 			Key string
-			// Expires is the expires argument value.
-			Expires time.Duration
+			// Params is the params argument value.
+			Params GetURLParams
 		}
 		// Keys holds details about calls to the Keys method.
 		Keys []struct {
@@ -180,37 +179,37 @@ func (mock *StoreMock) GetCalls() []struct {
 }
 
 // GetURL calls GetURLFunc.
-func (mock *StoreMock) GetURL(ctx context.Context, key string, expires time.Duration) (string, error) {
+func (mock *StoreMock) GetURL(ctx context.Context, key string, params GetURLParams) (string, error) {
 	if mock.GetURLFunc == nil {
 		panic("StoreMock.GetURLFunc: method is nil but Store.GetURL was just called")
 	}
 	callInfo := struct {
-		Ctx     context.Context
-		Key     string
-		Expires time.Duration
+		Ctx    context.Context
+		Key    string
+		Params GetURLParams
 	}{
-		Ctx:     ctx,
-		Key:     key,
-		Expires: expires,
+		Ctx:    ctx,
+		Key:    key,
+		Params: params,
 	}
 	mock.lockGetURL.Lock()
 	mock.calls.GetURL = append(mock.calls.GetURL, callInfo)
 	mock.lockGetURL.Unlock()
-	return mock.GetURLFunc(ctx, key, expires)
+	return mock.GetURLFunc(ctx, key, params)
 }
 
 // GetURLCalls gets all the calls that were made to GetURL.
 // Check the length with:
 //     len(mockedStore.GetURLCalls())
 func (mock *StoreMock) GetURLCalls() []struct {
-	Ctx     context.Context
-	Key     string
-	Expires time.Duration
+	Ctx    context.Context
+	Key    string
+	Params GetURLParams
 } {
 	var calls []struct {
-		Ctx     context.Context
-		Key     string
-		Expires time.Duration
+		Ctx    context.Context
+		Key    string
+		Params GetURLParams
 	}
 	mock.lockGetURL.RLock()
 	calls = mock.calls.GetURL

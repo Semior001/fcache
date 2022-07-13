@@ -107,7 +107,7 @@ func TestS3_GetURL(t *testing.T) {
 			prefix: "prefix",
 		}
 
-		meta, err := svc.GetURL(context.Background(), "key", 15*time.Minute)
+		meta, err := svc.GetURL(context.Background(), "key", GetURLParams{Expires: 15 * time.Minute})
 		require.NoError(t, err)
 		assert.Equal(t, "https://example.com/somefile.txt?somekey=somevalue", meta)
 	})

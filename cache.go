@@ -91,9 +91,9 @@ func (l *LoadingCache) GetFile(ctx context.Context, key string, fn Loader) (rd i
 }
 
 // GetURL returns the URL from the cache backend.
-func (l *LoadingCache) GetURL(ctx context.Context, key string, expires time.Duration, fn Loader) (url string, meta FileMeta, err error) {
+func (l *LoadingCache) GetURL(ctx context.Context, key string, req GetURLParams, fn Loader) (url string, meta FileMeta, err error) {
 	getURL := func(meta FileMeta) (string, FileMeta, error) {
-		u, err := l.Store.GetURL(ctx, key, expires)
+		u, err := l.Store.GetURL(ctx, key, req)
 		if err != nil {
 			atomic.AddInt64(&l.Errors, 1)
 			return "", FileMeta{}, fmt.Errorf("get url from storage: %w", err)

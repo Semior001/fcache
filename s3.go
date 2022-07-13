@@ -82,7 +82,7 @@ func (s *S3) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 }
 
 // GetURL returns the URL from the cache backend.
-func (s *S3) GetURL(ctx context.Context, key string, expires time.Duration) (string, error) {
+func (s *S3) GetURL(ctx context.Context, key string, params GetURLParams) (string, error) {
 	var errResp minio.ErrorResponse
 
 	oi, err := s.cl.StatObject(ctx, s.bucket, s.key(key), minio.StatObjectOptions{})
@@ -93,8 +93,13 @@ func (s *S3) GetURL(ctx context.Context, key string, expires time.Duration) (str
 		return "", fmt.Errorf("stat object from s3: %w", err)
 	}
 
-	u, err := s.cl.PresignedGetObject(ctx, s.bucket, s.key(key), expires, url.Values{
-		"response-content-disposition": []string{fmt.Sprintf("attachment; filename=%s", s.objectInfoToFile(oi).Name)},
+	filename := s.objectInfoToFile(oi).Name
+	if params.Filename != "" {
+		filename = params.Filename
+	}
+
+	u, err := s.cl.PresignedGetObject(ctx, s.bucket, s.key(key), params.Expires, url.Values{
+		"response-content-disposition": []string{fmt.Sprintf("attachment; filename=%s", filename)},
 	})
 	if err != nil {
 		return "", fmt.Errorf("get presigned URL from s3")

@@ -13,11 +13,17 @@ var ErrNotFound = errors.New("not found")
 //go:generate rm -f store_mock.go
 //go:generate moq -out store_mock.go -fmt goimports . Store
 
+// GetURLParams describes additional parameters, besides key, to form a signed URL.
+type GetURLParams struct {
+	Filename string
+	Expires  time.Duration
+}
+
 // Store defines methods that the backend store should implement
 type Store interface {
 	Meta(ctx context.Context, key string) (FileMeta, error)
 	Get(ctx context.Context, key string) (rd io.ReadCloser, err error)
-	GetURL(ctx context.Context, key string, expires time.Duration) (url string, err error)
+	GetURL(ctx context.Context, key string, params GetURLParams) (url string, err error)
 	Put(ctx context.Context, key string, meta FileMeta, rd io.ReadCloser) error
 	Remove(ctx context.Context, key string) error
 	Stat(ctx context.Context) (StoreStats, error)

@@ -117,15 +117,17 @@ func TestLoadingCache_GetURL(t *testing.T) {
 						CreatedAt: now,
 					}, nil
 				},
-				GetURLFunc: func(ctx context.Context, key string, expires time.Duration) (string, error) {
+				GetURLFunc: func(ctx context.Context, key string, params GetURLParams) (string, error) {
 					assert.Equal(t, "key", key)
-					assert.Equal(t, 15*time.Minute, expires)
+					assert.Equal(t, 15*time.Minute, params.Expires)
+					assert.Equal(t, "somefile.txt", params.Filename)
 					return "file-url", nil
 				},
 			},
 		}
 
-		url, meta, err := svc.GetURL(context.Background(), "key", 15*time.Minute, nil)
+		url, meta, err := svc.GetURL(context.Background(), "key",
+			GetURLParams{Filename: "somefile.txt", Expires: 15 * time.Minute}, nil)
 		require.NoError(t, err)
 		assert.Equal(t, FileMeta{
 			Name:      "a.txt",
@@ -161,15 +163,16 @@ func TestLoadingCache_GetURL(t *testing.T) {
 					assert.Equal(t, []byte("some file data"), bts)
 					return nil
 				},
-				GetURLFunc: func(ctx context.Context, key string, expires time.Duration) (string, error) {
+				GetURLFunc: func(ctx context.Context, key string, params GetURLParams) (string, error) {
 					assert.Equal(t, "key", key)
-					assert.Equal(t, 15*time.Minute, expires)
+					assert.Equal(t, 15*time.Minute, params.Expires)
+					assert.Empty(t, params.Filename)
 					return "file-url", nil
 				},
 			},
 		}
 
-		url, meta, err := svc.GetURL(context.Background(), "key", 15*time.Minute,
+		url, meta, err := svc.GetURL(context.Background(), "key", GetURLParams{Expires: 15 * time.Minute},
 			func(ctx context.Context) (io.ReadCloser, FileMeta, error) {
 				return io.NopCloser(strings.NewReader("some file data")), FileMeta{
 					Name:      "a.txt",
