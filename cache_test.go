@@ -35,7 +35,7 @@ func TestLoadingCache_GetFile(t *testing.T) {
 			},
 		}
 
-		rd, meta, err := svc.GetFile(context.Background(), "key", nil)
+		rd, meta, err := svc.GetFile(context.Background(), GetRequest{Key: "key", TTL: 30 * time.Minute, Loader: nil})
 		require.NoError(t, err)
 		assert.Equal(t, FileMeta{
 			Name:      "a.txt",
@@ -54,6 +54,7 @@ func TestLoadingCache_GetFile(t *testing.T) {
 		now := time.Now()
 
 		svc := &LoadingCache{
+			now: func() time.Time { return now },
 			Store: &StoreMock{
 				MetaFunc: func(ctx context.Context, key string) (FileMeta, error) {
 					assert.Equal(t, "key", key)
@@ -62,10 +63,12 @@ func TestLoadingCache_GetFile(t *testing.T) {
 				PutFunc: func(ctx context.Context, key string, meta FileMeta, rd io.ReadCloser) error {
 					assert.Equal(t, "key", key)
 					assert.Equal(t, FileMeta{
-						Name:      "a.txt",
-						Mime:      "text/plain",
-						Size:      17,
-						Meta:      map[string]string{invalidatableMetaKey: "1"},
+						Name: "a.txt",
+						Mime: "text/plain",
+						Size: 17,
+						Meta: map[string]string{
+							metaInvalidateAtKey: now.Add(30 * time.Minute).Format(metaTimeFormat),
+						},
 						Key:       "key",
 						CreatedAt: now,
 					}, meta)
@@ -77,8 +80,10 @@ func TestLoadingCache_GetFile(t *testing.T) {
 			},
 		}
 
-		rd, meta, err := svc.GetFile(context.Background(), "key",
-			func(ctx context.Context) (io.ReadCloser, FileMeta, error) {
+		rd, meta, err := svc.GetFile(context.Background(), GetRequest{
+			Key: "key",
+			TTL: 30 * time.Minute,
+			Loader: func(ctx context.Context) (io.ReadCloser, FileMeta, error) {
 				return io.NopCloser(strings.NewReader("some file data")), FileMeta{
 					Name:      "a.txt",
 					Mime:      "text/plain",
@@ -86,18 +91,20 @@ func TestLoadingCache_GetFile(t *testing.T) {
 					Key:       "key",
 					CreatedAt: now,
 				}, nil
-			})
+			},
+		})
 		require.NoError(t, err)
 		assert.Equal(t, FileMeta{
 			Name:      "a.txt",
 			Mime:      "text/plain",
-			Meta:      map[string]string{invalidatableMetaKey: "1"},
+			Meta:      map[string]string{metaInvalidateAtKey: now.Add(30 * time.Minute).Format(metaTimeFormat)},
 			Size:      17,
 			Key:       "key",
 			CreatedAt: now,
 		}, meta)
 		bts, err := io.ReadAll(rd)
 		require.NoError(t, err)
+		require.NoError(t, rd.Close())
 		assert.Equal(t, []byte("some file data"), bts)
 		assert.Equal(t, CacheStats{Misses: 1}, svc.CacheStats)
 	})
@@ -128,8 +135,10 @@ func TestLoadingCache_GetURL(t *testing.T) {
 			},
 		}
 
-		url, meta, err := svc.GetURL(context.Background(), "key",
-			GetURLParams{Filename: "somefile.txt", Expires: 15 * time.Minute}, nil)
+		url, meta, err := svc.GetURL(context.Background(),
+			GetRequest{Key: "key"},
+			GetURLParams{Filename: "somefile.txt", Expires: 15 * time.Minute},
+		)
 		require.NoError(t, err)
 		assert.Equal(t, FileMeta{
 			Name:      "a.txt",
@@ -146,6 +155,7 @@ func TestLoadingCache_GetURL(t *testing.T) {
 		now := time.Now()
 
 		svc := &LoadingCache{
+			now: func() time.Time { return now },
 			Store: &StoreMock{
 				MetaFunc: func(ctx context.Context, key string) (FileMeta, error) {
 					assert.Equal(t, "key", key)
@@ -154,10 +164,12 @@ func TestLoadingCache_GetURL(t *testing.T) {
 				PutFunc: func(ctx context.Context, key string, meta FileMeta, rd io.ReadCloser) error {
 					assert.Equal(t, "key", key)
 					assert.Equal(t, FileMeta{
-						Name:      "a.txt",
-						Mime:      "text/plain",
-						Size:      17,
-						Meta:      map[string]string{invalidatableMetaKey: "1"},
+						Name: "a.txt",
+						Mime: "text/plain",
+						Size: 17,
+						Meta: map[string]string{
+							metaInvalidateAtKey: now.Add(30 * time.Minute).Format(metaTimeFormat),
+						},
 						Key:       "key",
 						CreatedAt: now,
 					}, meta)
@@ -175,8 +187,10 @@ func TestLoadingCache_GetURL(t *testing.T) {
 			},
 		}
 
-		url, meta, err := svc.GetURL(context.Background(), "key", GetURLParams{Expires: 15 * time.Minute},
-			func(ctx context.Context) (io.ReadCloser, FileMeta, error) {
+		url, meta, err := svc.GetURL(context.Background(), GetRequest{
+			Key: "key",
+			TTL: 30 * time.Minute,
+			Loader: func(ctx context.Context) (io.ReadCloser, FileMeta, error) {
 				return io.NopCloser(strings.NewReader("some file data")), FileMeta{
 					Name:      "a.txt",
 					Mime:      "text/plain",
@@ -184,13 +198,14 @@ func TestLoadingCache_GetURL(t *testing.T) {
 					Key:       "key",
 					CreatedAt: now,
 				}, nil
-			})
+			},
+		}, GetURLParams{Expires: 15 * time.Minute})
 		require.NoError(t, err)
 		assert.Equal(t, FileMeta{
 			Name:      "a.txt",
 			Mime:      "text/plain",
 			Size:      17,
-			Meta:      map[string]string{invalidatableMetaKey: "1"},
+			Meta:      map[string]string{metaInvalidateAtKey: now.Add(30 * time.Minute).Format(metaTimeFormat)},
 			Key:       "key",
 			CreatedAt: now,
 		}, meta)
@@ -224,19 +239,22 @@ func TestLoadingCache_Stat(t *testing.T) {
 }
 
 func TestLoadingCache_Invalidation(t *testing.T) {
-	invalidatable := map[string]string{invalidatableMetaKey: "1"}
-
 	t.Run("success", func(t *testing.T) {
 		now := time.Date(2022, time.July, 5, 6, 51, 21, 0, time.UTC)
+
+		invalidationMeta := func(tm time.Time) map[string]string {
+			return map[string]string{metaInvalidateAtKey: tm.Format(metaTimeFormat)}
+		}
+
 		ctx, cancel := context.WithCancel(context.Background())
 		store := &StoreMock{
 			ListFunc: func(ctx context.Context) ([]FileMeta, error) {
 				cancel()
 				return []FileMeta{
-					{Key: "key", Meta: invalidatable, CreatedAt: now.Add(-45 * time.Minute)},   // will be removed
-					{Key: "key-1", Meta: invalidatable, CreatedAt: now.Add(-15 * time.Minute)}, // will NOT be removed
-					{Key: "key-2", Meta: invalidatable, CreatedAt: now.Add(-60 * time.Minute)}, // will be removed
-					{Key: "key-3", CreatedAt: now.Add(-60 * time.Minute)},                      // will NOT be removed
+					{Key: "key", Meta: invalidationMeta(now.Add(-15 * time.Minute))},   // will be removed
+					{Key: "key-1", Meta: invalidationMeta(now.Add(15 * time.Minute))},  // will NOT be removed
+					{Key: "key-2", Meta: invalidationMeta(now.Add(-30 * time.Minute))}, // will be removed
+					{Key: "key-3"}, // will NOT be removed
 				}, nil
 			},
 			RemoveFunc: func(ctx context.Context, key string) error { return nil },
@@ -244,7 +262,6 @@ func TestLoadingCache_Invalidation(t *testing.T) {
 		svc := &LoadingCache{
 			now: func() time.Time { return now },
 			Options: Options{
-				TTL:              30 * time.Minute,
 				InvalidatePeriod: time.Millisecond,
 				Log:              NopLogger(),
 			},

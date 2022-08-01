@@ -1,15 +1,20 @@
 package fcache
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/go-multierror"
+)
+
+const (
+	metaTimeFormat      = time.RFC3339
+	metaInvalidateAtKey = "_invalidate_at"
 )
 
 // Loader is a function to load a file in case if it's missing in cache.
@@ -31,7 +36,6 @@ func NewLoadingCache(backend Store, opts ...Option) *LoadingCache {
 	res := &LoadingCache{
 		Store: backend,
 		Options: Options{
-			TTL:              30 * time.Minute,
 			InvalidatePeriod: 15 * time.Minute,
 			Log:              stdLogger{},
 		},
@@ -45,15 +49,13 @@ func NewLoadingCache(backend Store, opts ...Option) *LoadingCache {
 	return res
 }
 
-const invalidatableMetaKey = "_fcache-Invalidatable"
-
 // GetFile gets the file from cache or loads it, if absent.
-func (l *LoadingCache) GetFile(ctx context.Context, key string, fn Loader) (rd io.Reader, meta FileMeta, err error) {
-	if meta, err = l.Store.Meta(ctx, key); err == nil {
+func (l *LoadingCache) GetFile(ctx context.Context, req GetRequest) (rd io.ReadCloser, meta FileMeta, err error) {
+	if meta, err = l.Store.Meta(ctx, req.Key); err == nil {
 		// cache hit
 		atomic.AddInt64(&l.Hits, 1)
 
-		if rd, err = l.Store.Get(ctx, key); err != nil {
+		if rd, err = l.Store.Get(ctx, req.Key); err != nil {
 			atomic.AddInt64(&l.Errors, 1)
 			return rd, meta, fmt.Errorf("get file reader: %w", err)
 		}
@@ -70,25 +72,30 @@ func (l *LoadingCache) GetFile(ctx context.Context, key string, fn Loader) (rd i
 	// miss
 	atomic.AddInt64(&l.Misses, 1)
 
-	originalRd, meta, err := fn(ctx)
+	originalRd, meta, err := req.Loader(ctx)
 	if err != nil {
 		return nil, FileMeta{}, fmt.Errorf("loader returned error: %w", err)
 	}
 
 	// duplicating reader to still return file content, when reader is emptied
-	// fixme: probably this part needs to be limited, or file should be saved in
-	// tmp, so a limited amount of files would be in memory
-	buf := &bytes.Buffer{}
-	putRd := io.TeeReader(originalRd, buf)
-	rd = io.NopCloser(buf)
+	tmp, err := os.CreateTemp(os.TempDir(), "fcache_*")
+	if err != nil {
+		return nil, FileMeta{}, fmt.Errorf("create temp file: %w", err)
+	}
+	putRd := io.TeeReader(originalRd, tmp)
+	rd = &tempFile{File: tmp} // wrap file to delete it immediately, when is closed
 
 	if meta.Meta == nil {
 		meta.Meta = map[string]string{}
 	}
-	meta.Meta[invalidatableMetaKey] = "1"
+	meta.Meta[metaInvalidateAtKey] = l.now().Add(req.TTL).Format(metaTimeFormat)
 
-	if err = l.Store.Put(ctx, key, meta, io.NopCloser(putRd)); err != nil {
+	if err = l.Store.Put(ctx, req.Key, meta, io.NopCloser(putRd)); err != nil {
 		return rd, meta, fmt.Errorf("put file into storage: %w", err)
+	}
+
+	if _, err = tmp.Seek(0, io.SeekStart); err != nil {
+		return rd, meta, fmt.Errorf("reset temp file caret to file start: %w", err)
 	}
 
 	if err = originalRd.Close(); err != nil {
@@ -99,9 +106,9 @@ func (l *LoadingCache) GetFile(ctx context.Context, key string, fn Loader) (rd i
 }
 
 // GetURL returns the URL from the cache backend.
-func (l *LoadingCache) GetURL(ctx context.Context, key string, req GetURLParams, fn Loader) (url string, meta FileMeta, err error) {
+func (l *LoadingCache) GetURL(ctx context.Context, req GetRequest, params GetURLParams) (url string, meta FileMeta, err error) {
 	getURL := func(meta FileMeta) (string, FileMeta, error) {
-		u, err := l.Store.GetURL(ctx, key, req)
+		u, err := l.Store.GetURL(ctx, req.Key, params)
 		if err != nil {
 			atomic.AddInt64(&l.Errors, 1)
 			return "", FileMeta{}, fmt.Errorf("get url from storage: %w", err)
@@ -110,7 +117,7 @@ func (l *LoadingCache) GetURL(ctx context.Context, key string, req GetURLParams,
 		return u, meta, nil
 	}
 
-	if meta, err = l.Store.Meta(ctx, key); err == nil {
+	if meta, err = l.Store.Meta(ctx, req.Key); err == nil {
 		// cache hit
 		atomic.AddInt64(&l.Hits, 1)
 		return getURL(meta)
@@ -125,7 +132,7 @@ func (l *LoadingCache) GetURL(ctx context.Context, key string, req GetURLParams,
 	// miss
 	atomic.AddInt64(&l.Misses, 1)
 
-	rd, meta, err := fn(ctx)
+	rd, meta, err := req.Loader(ctx)
 	if err != nil {
 		atomic.AddInt64(&l.Errors, 1)
 		return "", FileMeta{}, fmt.Errorf("loader returned error: %w", err)
@@ -134,9 +141,9 @@ func (l *LoadingCache) GetURL(ctx context.Context, key string, req GetURLParams,
 	if meta.Meta == nil {
 		meta.Meta = map[string]string{}
 	}
-	meta.Meta[invalidatableMetaKey] = "1"
+	meta.Meta[metaInvalidateAtKey] = l.now().Add(req.TTL).Format(metaTimeFormat)
 
-	if err = l.Store.Put(ctx, key, meta, rd); err != nil {
+	if err = l.Store.Put(ctx, req.Key, meta, rd); err != nil {
 		atomic.AddInt64(&l.Errors, 1)
 		return "", FileMeta{}, fmt.Errorf("put file into storage: %w", err)
 	}
@@ -203,10 +210,15 @@ func (l *LoadingCache) invalidate(ctx context.Context) error {
 		if meta.Meta == nil {
 			continue
 		}
-		if v, ok := meta.Meta[invalidatableMetaKey]; !ok || v != "1" {
+		tm, ok := meta.Meta[metaInvalidateAtKey]
+		if !ok {
 			continue
 		}
-		if meta.CreatedAt.Add(l.TTL).Before(l.now()) {
+		invalidateAt, err := time.Parse(metaTimeFormat, tm)
+		if err != nil {
+			errs = multierror.Append(errs, fmt.Errorf("parse invalidate_at time: %w", err))
+		}
+		if invalidateAt.Before(l.now()) {
 			if err = l.Store.Remove(ctx, meta.Key); err != nil {
 				errs = multierror.Append(err, fmt.Errorf("remove file under key %q: %w", meta.Key, err))
 				continue
@@ -216,4 +228,16 @@ func (l *LoadingCache) invalidate(ctx context.Context) error {
 	}
 
 	return errs.ErrorOrNil()
+}
+
+type tempFile struct{ *os.File }
+
+func (t *tempFile) Close() error {
+	if err := t.File.Close(); err != nil {
+		return fmt.Errorf("close file: %w", err)
+	}
+	if err := os.Remove(t.Name()); err != nil {
+		return fmt.Errorf("remove file: %w", err)
+	}
+	return nil
 }
