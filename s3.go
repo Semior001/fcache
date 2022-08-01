@@ -16,7 +16,7 @@ import (
 //go:generate rm -f s3_mock.go
 //go:generate moq -out s3_mock.go -fmt goimports . s3client
 
-const filenameMetaHeader = "X-Amz-Meta-Filename"
+const filenameMetaHeader = "_fcache-S3-Meta-Filename"
 
 type s3client interface {
 	PutObject(ctx context.Context, bkt, key string, rd io.Reader, sz int64, opts minio.PutObjectOptions) (minio.UploadInfo, error)
@@ -114,9 +114,15 @@ func (s *S3) Put(ctx context.Context, key string, meta FileMeta, rd io.ReadClose
 			s.log.Printf("[WARN] failed to close reader: %v", err)
 		}
 	}()
+
+	if meta.Meta == nil {
+		meta.Meta = map[string]string{}
+	}
+	meta.Meta[filenameMetaHeader] = meta.Name
+
 	_, perr := s.cl.PutObject(ctx, s.bucket, s.key(key), rd, meta.Size, minio.PutObjectOptions{
 		ContentType:  meta.Mime,
-		UserMetadata: map[string]string{filenameMetaHeader: meta.Name},
+		UserMetadata: meta.Meta,
 	})
 	if perr != nil {
 		return fmt.Errorf("put file in s3: %w", perr)
@@ -209,6 +215,7 @@ func (s *S3) objectInfoToFile(oi minio.ObjectInfo) FileMeta {
 		Name: oi.Metadata.Get(filenameMetaHeader),
 		Mime: oi.ContentType,
 		Size: oi.Size,
+		Meta: oi.UserMetadata,
 		Key:  s.parseKey(oi.Key),
 		// s3 maintains only last modified date, this implementation assumes
 		// that files are untouched by external forces
