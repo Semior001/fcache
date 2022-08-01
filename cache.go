@@ -15,7 +15,8 @@ import (
 // Loader is a function to load a file in case if it's missing in cache.
 type Loader func(ctx context.Context) (io.ReadCloser, FileMeta, error)
 
-// LoadingCache is a wrapper for Store, which removes file at their TTL
+// LoadingCache is a wrapper for Store, which removes file at their TTL.
+// Only files, added by GetFile and GetURL methods will be removed.
 type LoadingCache struct {
 	Store
 	Options
@@ -43,6 +44,8 @@ func NewLoadingCache(backend Store, opts ...Option) *LoadingCache {
 
 	return res
 }
+
+const invalidatableMetaKey = "_fcache-Invalidatable"
 
 // GetFile gets the file from cache or loads it, if absent.
 func (l *LoadingCache) GetFile(ctx context.Context, key string, fn Loader) (rd io.Reader, meta FileMeta, err error) {
@@ -78,6 +81,11 @@ func (l *LoadingCache) GetFile(ctx context.Context, key string, fn Loader) (rd i
 	buf := &bytes.Buffer{}
 	putRd := io.TeeReader(originalRd, buf)
 	rd = io.NopCloser(buf)
+
+	if meta.Meta == nil {
+		meta.Meta = map[string]string{}
+	}
+	meta.Meta[invalidatableMetaKey] = "1"
 
 	if err = l.Store.Put(ctx, key, meta, io.NopCloser(putRd)); err != nil {
 		return rd, meta, fmt.Errorf("put file into storage: %w", err)
@@ -122,6 +130,11 @@ func (l *LoadingCache) GetURL(ctx context.Context, key string, req GetURLParams,
 		atomic.AddInt64(&l.Errors, 1)
 		return "", FileMeta{}, fmt.Errorf("loader returned error: %w", err)
 	}
+
+	if meta.Meta == nil {
+		meta.Meta = map[string]string{}
+	}
+	meta.Meta[invalidatableMetaKey] = "1"
 
 	if err = l.Store.Put(ctx, key, meta, rd); err != nil {
 		atomic.AddInt64(&l.Errors, 1)
@@ -187,6 +200,12 @@ func (l *LoadingCache) invalidate(ctx context.Context) error {
 	errs := &multierror.Error{}
 
 	for _, meta := range metas {
+		if meta.Meta == nil {
+			continue
+		}
+		if v, ok := meta.Meta[invalidatableMetaKey]; !ok || v != "1" {
+			continue
+		}
 		if meta.CreatedAt.Add(l.TTL).Before(l.now()) {
 			if err = l.Store.Remove(ctx, meta.Key); err != nil {
 				errs = multierror.Append(err, fmt.Errorf("remove file under key %q: %w", meta.Key, err))

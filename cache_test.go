@@ -65,6 +65,7 @@ func TestLoadingCache_GetFile(t *testing.T) {
 						Name:      "a.txt",
 						Mime:      "text/plain",
 						Size:      17,
+						Meta:      map[string]string{invalidatableMetaKey: "1"},
 						Key:       "key",
 						CreatedAt: now,
 					}, meta)
@@ -90,6 +91,7 @@ func TestLoadingCache_GetFile(t *testing.T) {
 		assert.Equal(t, FileMeta{
 			Name:      "a.txt",
 			Mime:      "text/plain",
+			Meta:      map[string]string{invalidatableMetaKey: "1"},
 			Size:      17,
 			Key:       "key",
 			CreatedAt: now,
@@ -155,6 +157,7 @@ func TestLoadingCache_GetURL(t *testing.T) {
 						Name:      "a.txt",
 						Mime:      "text/plain",
 						Size:      17,
+						Meta:      map[string]string{invalidatableMetaKey: "1"},
 						Key:       "key",
 						CreatedAt: now,
 					}, meta)
@@ -187,6 +190,7 @@ func TestLoadingCache_GetURL(t *testing.T) {
 			Name:      "a.txt",
 			Mime:      "text/plain",
 			Size:      17,
+			Meta:      map[string]string{invalidatableMetaKey: "1"},
 			Key:       "key",
 			CreatedAt: now,
 		}, meta)
@@ -220,6 +224,8 @@ func TestLoadingCache_Stat(t *testing.T) {
 }
 
 func TestLoadingCache_Invalidation(t *testing.T) {
+	invalidatable := map[string]string{invalidatableMetaKey: "1"}
+
 	t.Run("success", func(t *testing.T) {
 		now := time.Date(2022, time.July, 5, 6, 51, 21, 0, time.UTC)
 		ctx, cancel := context.WithCancel(context.Background())
@@ -227,9 +233,10 @@ func TestLoadingCache_Invalidation(t *testing.T) {
 			ListFunc: func(ctx context.Context) ([]FileMeta, error) {
 				cancel()
 				return []FileMeta{
-					{Key: "key", CreatedAt: now.Add(-45 * time.Minute)},   // will be removed
-					{Key: "key-1", CreatedAt: now.Add(-15 * time.Minute)}, // will NOT be removed
-					{Key: "key-2", CreatedAt: now.Add(-60 * time.Minute)}, // will be removed
+					{Key: "key", Meta: invalidatable, CreatedAt: now.Add(-45 * time.Minute)},   // will be removed
+					{Key: "key-1", Meta: invalidatable, CreatedAt: now.Add(-15 * time.Minute)}, // will NOT be removed
+					{Key: "key-2", Meta: invalidatable, CreatedAt: now.Add(-60 * time.Minute)}, // will be removed
+					{Key: "key-3", CreatedAt: now.Add(-60 * time.Minute)},                      // will NOT be removed
 				}, nil
 			},
 			RemoveFunc: func(ctx context.Context, key string) error { return nil },

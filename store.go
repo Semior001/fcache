@@ -41,6 +41,11 @@ type StoreStats struct {
 type FileMeta struct {
 	Name string
 	Mime string
+
+	// Meta maintains additional data about the file.
+	// Note: some metadata keys with leading underscore are reserved by fcache.
+	Meta map[string]string
+
 	// Size might not be provided when loading file, though it might be useful
 	// for some cache implementations, like S3 as it runs streaming multipart
 	// method, if size is provided
