@@ -3,7 +3,6 @@ package fcache
 import (
 	"context"
 	"io"
-	"net/http"
 	"net/url"
 	"strings"
 	"testing"
@@ -24,7 +23,7 @@ func TestS3_Meta(t *testing.T) {
 					assert.Equal(t, "prefix!!key", key)
 					assert.Empty(t, opts)
 					return minio.ObjectInfo{
-						Metadata:     http.Header{filenameMetaHeader: []string{"a.txt"}},
+						UserMetadata: map[string]string{filenameMetaHeader: "a.txt"},
 						ContentType:  "text/plain",
 						Size:         123,
 						LastModified: now,
@@ -41,6 +40,7 @@ func TestS3_Meta(t *testing.T) {
 		assert.Equal(t, FileMeta{
 			Name:      "a.txt",
 			Mime:      "text/plain",
+			Meta:      map[string]string{},
 			Size:      123,
 			Key:       "key",
 			CreatedAt: now,
@@ -82,7 +82,7 @@ func TestS3_GetURL(t *testing.T) {
 					assert.Equal(t, "prefix!!key", key)
 					assert.Empty(t, opts)
 					return minio.ObjectInfo{
-						Metadata:     http.Header{filenameMetaHeader: []string{"a.txt"}},
+						UserMetadata: map[string]string{filenameMetaHeader: "a.txt"},
 						ContentType:  "text/plain",
 						Size:         123,
 						LastModified: now,
@@ -205,14 +205,14 @@ func TestS3_List(t *testing.T) {
 					assert.Equal(t, "bucket", bkt)
 					ch := make(chan minio.ObjectInfo, 2)
 					ch <- minio.ObjectInfo{
-						Metadata:     map[string][]string{filenameMetaHeader: {"a.txt"}},
+						UserMetadata: map[string]string{filenameMetaHeader: "a.txt"},
 						ContentType:  "text/plain",
 						Size:         12,
 						Key:          "prefix!!key",
 						LastModified: now,
 					}
 					ch <- minio.ObjectInfo{
-						Metadata:     map[string][]string{filenameMetaHeader: {"b.txt"}},
+						UserMetadata: map[string]string{filenameMetaHeader: "b.txt"},
 						ContentType:  "text/plain",
 						Size:         16,
 						Key:          "prefix!!key-1",
@@ -231,6 +231,7 @@ func TestS3_List(t *testing.T) {
 			{
 				Name:      "a.txt",
 				Mime:      "text/plain",
+				Meta:      map[string]string{},
 				Size:      12,
 				Key:       "key",
 				CreatedAt: now,
@@ -238,6 +239,7 @@ func TestS3_List(t *testing.T) {
 			{
 				Name:      "b.txt",
 				Mime:      "text/plain",
+				Meta:      map[string]string{},
 				Size:      16,
 				Key:       "key-1",
 				CreatedAt: now.Add(15 * time.Minute),

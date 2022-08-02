@@ -2,22 +2,25 @@ package fcache
 
 import "time"
 
+// GetRequest defines parameters to get file.
+type GetRequest struct {
+	Key string
+	TTL time.Duration
+	Loader
+}
+
 // Options defines cache options.
 type Options struct {
-	TTL time.Duration
 	Log Logger
 	// InvalidatePeriod sets the time for checking cache for expired items.
 	// Zero means "no invalidation", i.e. backend invalidates items by its own.
 	InvalidatePeriod time.Duration
+	// ExtendTTL sets whether cache should extend TTL of cached items on hit.
+	ExtendTTL bool
 }
 
 // Option is a function to apply options.
 type Option func(*Options)
-
-// WithTTL sets the TTL duration for cache items.
-func WithTTL(ttl time.Duration) Option {
-	return func(o *Options) { o.TTL = ttl }
-}
 
 // WithLogger sets logger for cache.
 // `log` package is used by default.
