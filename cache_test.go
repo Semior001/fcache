@@ -17,16 +17,35 @@ func TestLoadingCache_GetFile(t *testing.T) {
 		now := time.Now()
 
 		svc := &LoadingCache{
+			now:     func() time.Time { return now },
+			Options: Options{ExtendTTL: true},
 			Store: &StoreMock{
 				MetaFunc: func(ctx context.Context, key string) (FileMeta, error) {
 					assert.Equal(t, "key", key)
 					return FileMeta{
-						Name:      "a.txt",
-						Mime:      "text/plain",
-						Size:      17,
+						Name: "a.txt",
+						Mime: "text/plain",
+						Size: 17,
+						Meta: map[string]string{
+							metaInvalidateAtKey: now.Add(15 * time.Minute).Format(metaTimeFormat),
+						},
 						Key:       "key",
 						CreatedAt: now,
 					}, nil
+				},
+				UpdateMetaFunc: func(ctx context.Context, key string, meta FileMeta) error {
+					assert.Equal(t, "key", key)
+					assert.Equal(t, FileMeta{
+						Name: "a.txt",
+						Mime: "text/plain",
+						Size: 17,
+						Meta: map[string]string{
+							metaInvalidateAtKey: now.Add(45 * time.Minute).Format(metaTimeFormat),
+						},
+						Key:       "key",
+						CreatedAt: now,
+					}, meta)
+					return nil
 				},
 				GetFunc: func(ctx context.Context, key string) (io.ReadCloser, error) {
 					assert.Equal(t, "key", key)
@@ -38,9 +57,12 @@ func TestLoadingCache_GetFile(t *testing.T) {
 		rd, meta, err := svc.GetFile(context.Background(), GetRequest{Key: "key", TTL: 30 * time.Minute, Loader: nil})
 		require.NoError(t, err)
 		assert.Equal(t, FileMeta{
-			Name:      "a.txt",
-			Mime:      "text/plain",
-			Size:      17,
+			Name: "a.txt",
+			Mime: "text/plain",
+			Size: 17,
+			Meta: map[string]string{
+				metaInvalidateAtKey: now.Add(45 * time.Minute).Format(metaTimeFormat),
+			},
 			Key:       "key",
 			CreatedAt: now,
 		}, meta)

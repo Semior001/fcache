@@ -16,6 +16,7 @@ import (
 //go:generate rm -f s3_mock.go
 //go:generate moq -out s3_mock.go -fmt goimports . s3client
 
+const amzMetaPrefix = "X-Amz-Meta-"
 const filenameMetaHeader = "_fcache-S3-Meta-Filename"
 
 type s3client interface {
@@ -30,6 +31,7 @@ type s3client interface {
 		expires time.Duration,
 		reqParams url.Values,
 	) (u *url.URL, err error)
+	CopyObject(ctx context.Context, dst minio.CopyDestOptions, src minio.CopySrcOptions) (minio.UploadInfo, error)
 }
 
 // S3 implements Cache for S3.
@@ -66,14 +68,34 @@ func (s *S3) Meta(ctx context.Context, key string) (FileMeta, error) {
 	return s.objectInfoToFile(oi), nil
 }
 
-// Get gets the file from cache or loads it, if absent.
-func (s *S3) Get(ctx context.Context, key string) (io.ReadCloser, error) {
-	var errResp minio.ErrorResponse
-
-	obj, err := s.cl.GetObject(ctx, s.bucket, s.key(key), minio.GetObjectOptions{})
-	if errors.As(err, &errResp) && errResp.StatusCode == http.StatusNotFound {
-		return nil, ErrNotFound
+// UpdateMeta updates meta information about the file at underlying key.
+func (s *S3) UpdateMeta(ctx context.Context, key string, meta FileMeta) error {
+	if meta.Meta == nil {
+		meta.Meta = map[string]string{}
 	}
+	meta.Meta[filenameMetaHeader] = meta.Name
+
+	destOpts := minio.CopyDestOptions{
+		Bucket:          s.bucket,
+		Object:          s.key(key),
+		ReplaceMetadata: true,
+		UserMetadata:    meta.Meta,
+	}
+
+	_, err := s.cl.CopyObject(ctx, destOpts, minio.CopySrcOptions{Bucket: s.bucket, Object: s.key(key)})
+	if err != nil {
+		return fmt.Errorf("copy object to itself: %w", err)
+	}
+
+	return nil
+}
+
+// Get gets the file from cache or loads it, if absent.
+// NOTE: if file under this key is not present in S3, this method WILL NOT
+// return a NotFound error, instead, it will return a reader, which will return
+// error when there will be an attempt to read.
+func (s *S3) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	obj, err := s.cl.GetObject(ctx, s.bucket, s.key(key), minio.GetObjectOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("s3 returned error: %w", err)
 	}
@@ -102,7 +124,7 @@ func (s *S3) GetURL(ctx context.Context, key string, params GetURLParams) (strin
 		"response-content-disposition": []string{fmt.Sprintf("attachment; filename=%s", filename)},
 	})
 	if err != nil {
-		return "", fmt.Errorf("get presigned URL from s3")
+		return "", fmt.Errorf("get presigned URL from s3: %w", err)
 	}
 	return u.String(), nil
 }
@@ -211,14 +233,28 @@ func (s *S3) parseKey(key string) string {
 }
 
 func (s *S3) objectInfoToFile(oi minio.ObjectInfo) FileMeta {
-	return FileMeta{
-		Name: oi.Metadata.Get(filenameMetaHeader),
+	meta := FileMeta{
 		Mime: oi.ContentType,
 		Size: oi.Size,
-		Meta: oi.UserMetadata,
+		Meta: map[string]string{},
 		Key:  s.parseKey(oi.Key),
 		// s3 maintains only last modified date, this implementation assumes
 		// that files are untouched by external forces
 		CreatedAt: oi.LastModified,
 	}
+
+	for k, v := range oi.UserMetadata {
+		k = strings.TrimPrefix(k, amzMetaPrefix)
+		switch {
+		case strings.ToLower(k) == "content-type":
+			meta.Mime = v
+			continue
+		case k == filenameMetaHeader:
+			meta.Name = v
+			continue
+		}
+		meta.Meta[k] = v
+	}
+
+	return meta
 }

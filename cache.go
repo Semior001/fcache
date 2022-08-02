@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	metaTimeFormat      = time.RFC3339
+	metaTimeFormat      = time.RFC3339Nano
 	metaInvalidateAtKey = "_invalidate_at"
 )
 
@@ -58,6 +58,10 @@ func (l *LoadingCache) GetFile(ctx context.Context, req GetRequest) (rd io.ReadC
 		if rd, err = l.Store.Get(ctx, req.Key); err != nil {
 			atomic.AddInt64(&l.Errors, 1)
 			return rd, meta, fmt.Errorf("get file reader: %w", err)
+		}
+
+		if meta, err = l.extendTTL(ctx, req.Key, req.TTL, meta); err != nil {
+			return rd, meta, fmt.Errorf("extend file's TTL: %w", err)
 		}
 
 		return rd, meta, nil
@@ -120,6 +124,11 @@ func (l *LoadingCache) GetURL(ctx context.Context, req GetRequest, params GetURL
 	if meta, err = l.Store.Meta(ctx, req.Key); err == nil {
 		// cache hit
 		atomic.AddInt64(&l.Hits, 1)
+
+		if meta, err = l.extendTTL(ctx, req.Key, req.TTL, meta); err != nil {
+			return "", meta, fmt.Errorf("extend file's TTL: %w", err)
+		}
+
 		return getURL(meta)
 	}
 
@@ -189,28 +198,32 @@ func (l *LoadingCache) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ticker.C:
-			if err := l.invalidate(ctx); err != nil {
+			invalidated, err := l.Invalidate(ctx)
+			if err != nil {
 				l.Log.Printf("[WARN] failed to invalidate cache items: %v", err)
 			}
+			l.Log.Printf("[DEBUG] invalidated %d items", invalidated)
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
 }
 
-func (l *LoadingCache) invalidate(ctx context.Context) error {
-	metas, err := l.Store.List(ctx)
+// Invalidate invalidates expired cache items.
+// Used for tests.
+func (l *LoadingCache) Invalidate(ctx context.Context) (invalidated int64, err error) {
+	files, err := l.Store.List(ctx)
 	if err != nil {
-		return fmt.Errorf("list objects from store: %w", err)
+		return 0, fmt.Errorf("list objects from store: %w", err)
 	}
 
 	errs := &multierror.Error{}
 
-	for _, meta := range metas {
-		if meta.Meta == nil {
+	for _, file := range files {
+		if file.Meta == nil {
 			continue
 		}
-		tm, ok := meta.Meta[metaInvalidateAtKey]
+		tm, ok := file.Meta[metaInvalidateAtKey]
 		if !ok {
 			continue
 		}
@@ -219,15 +232,44 @@ func (l *LoadingCache) invalidate(ctx context.Context) error {
 			errs = multierror.Append(errs, fmt.Errorf("parse invalidate_at time: %w", err))
 		}
 		if invalidateAt.Before(l.now()) {
-			if err = l.Store.Remove(ctx, meta.Key); err != nil {
-				errs = multierror.Append(err, fmt.Errorf("remove file under key %q: %w", meta.Key, err))
+			if err = l.Store.Remove(ctx, file.Key); err != nil {
+				errs = multierror.Append(err, fmt.Errorf("remove file under key %q: %w", file.Key, err))
 				continue
 			}
+			invalidated++
 		}
-		l.Log.Printf("[DEBUG] removed file with key %q", meta.Key)
+		l.Log.Printf("[DEBUG] removed file with key %q", file.Key)
 	}
 
-	return errs.ErrorOrNil()
+	return invalidated, errs.ErrorOrNil()
+}
+
+func (l *LoadingCache) extendTTL(ctx context.Context, key string, ttl time.Duration, meta FileMeta) (FileMeta, error) {
+	if !l.ExtendTTL {
+		return meta, nil
+	}
+
+	if meta.Meta == nil {
+		meta.Meta = map[string]string{}
+	}
+
+	v, ok := meta.Meta[metaInvalidateAtKey]
+	if !ok {
+		meta.Meta[metaInvalidateAtKey] = l.now().Add(ttl).Format(metaTimeFormat)
+	}
+
+	tm, err := time.Parse(metaTimeFormat, v)
+	if err != nil {
+		return meta, fmt.Errorf("parse invalidate_at time: %w", err)
+	}
+
+	meta.Meta[metaInvalidateAtKey] = tm.Add(ttl).Format(metaTimeFormat)
+
+	if err = l.Store.UpdateMeta(ctx, key, meta); err != nil {
+		return meta, fmt.Errorf("update file meta: %w", err)
+	}
+
+	return meta, nil
 }
 
 type tempFile struct{ *os.File }

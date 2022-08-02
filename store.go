@@ -22,6 +22,7 @@ type GetURLParams struct {
 // Store defines methods that the backend store should implement
 type Store interface {
 	Meta(ctx context.Context, key string) (FileMeta, error)
+	UpdateMeta(ctx context.Context, key string, meta FileMeta) error
 	Get(ctx context.Context, key string) (rd io.ReadCloser, err error)
 	GetURL(ctx context.Context, key string, params GetURLParams) (url string, err error)
 	Put(ctx context.Context, key string, meta FileMeta, rd io.ReadCloser) error

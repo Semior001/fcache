@@ -15,6 +15,8 @@ type Options struct {
 	// InvalidatePeriod sets the time for checking cache for expired items.
 	// Zero means "no invalidation", i.e. backend invalidates items by its own.
 	InvalidatePeriod time.Duration
+	// ExtendTTL sets whether cache should extend TTL of cached items on hit.
+	ExtendTTL bool
 }
 
 // Option is a function to apply options.

@@ -43,6 +43,9 @@ var _ Store = &StoreMock{}
 // 			StatFunc: func(ctx context.Context) (StoreStats, error) {
 // 				panic("mock out the Stat method")
 // 			},
+// 			UpdateMetaFunc: func(ctx context.Context, key string, meta FileMeta) error {
+// 				panic("mock out the UpdateMeta method")
+// 			},
 // 		}
 //
 // 		// use mockedStore in code that requires Store
@@ -73,6 +76,9 @@ type StoreMock struct {
 
 	// StatFunc mocks the Stat method.
 	StatFunc func(ctx context.Context) (StoreStats, error)
+
+	// UpdateMetaFunc mocks the UpdateMeta method.
+	UpdateMetaFunc func(ctx context.Context, key string, meta FileMeta) error
 
 	// calls tracks calls to the methods.
 	calls struct {
@@ -132,15 +138,25 @@ type StoreMock struct {
 			// Ctx is the ctx argument value.
 			Ctx context.Context
 		}
+		// UpdateMeta holds details about calls to the UpdateMeta method.
+		UpdateMeta []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Key is the key argument value.
+			Key string
+			// Meta is the meta argument value.
+			Meta FileMeta
+		}
 	}
-	lockGet    sync.RWMutex
-	lockGetURL sync.RWMutex
-	lockKeys   sync.RWMutex
-	lockList   sync.RWMutex
-	lockMeta   sync.RWMutex
-	lockPut    sync.RWMutex
-	lockRemove sync.RWMutex
-	lockStat   sync.RWMutex
+	lockGet        sync.RWMutex
+	lockGetURL     sync.RWMutex
+	lockKeys       sync.RWMutex
+	lockList       sync.RWMutex
+	lockMeta       sync.RWMutex
+	lockPut        sync.RWMutex
+	lockRemove     sync.RWMutex
+	lockStat       sync.RWMutex
+	lockUpdateMeta sync.RWMutex
 }
 
 // Get calls GetFunc.
@@ -420,5 +436,44 @@ func (mock *StoreMock) StatCalls() []struct {
 	mock.lockStat.RLock()
 	calls = mock.calls.Stat
 	mock.lockStat.RUnlock()
+	return calls
+}
+
+// UpdateMeta calls UpdateMetaFunc.
+func (mock *StoreMock) UpdateMeta(ctx context.Context, key string, meta FileMeta) error {
+	if mock.UpdateMetaFunc == nil {
+		panic("StoreMock.UpdateMetaFunc: method is nil but Store.UpdateMeta was just called")
+	}
+	callInfo := struct {
+		Ctx  context.Context
+		Key  string
+		Meta FileMeta
+	}{
+		Ctx:  ctx,
+		Key:  key,
+		Meta: meta,
+	}
+	mock.lockUpdateMeta.Lock()
+	mock.calls.UpdateMeta = append(mock.calls.UpdateMeta, callInfo)
+	mock.lockUpdateMeta.Unlock()
+	return mock.UpdateMetaFunc(ctx, key, meta)
+}
+
+// UpdateMetaCalls gets all the calls that were made to UpdateMeta.
+// Check the length with:
+//     len(mockedStore.UpdateMetaCalls())
+func (mock *StoreMock) UpdateMetaCalls() []struct {
+	Ctx  context.Context
+	Key  string
+	Meta FileMeta
+} {
+	var calls []struct {
+		Ctx  context.Context
+		Key  string
+		Meta FileMeta
+	}
+	mock.lockUpdateMeta.RLock()
+	calls = mock.calls.UpdateMeta
+	mock.lockUpdateMeta.RUnlock()
 	return calls
 }
