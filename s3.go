@@ -35,6 +35,7 @@ type s3client interface {
 }
 
 // S3 implements Cache for S3.
+// test
 type S3 struct {
 	log Logger
 	cl  s3client
